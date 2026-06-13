@@ -1,6 +1,11 @@
 """构建芙宁娜语音台词 RAG 知识库 —— 按 ## 标题分割版本"""
+import os
 import chromadb
 from pathlib import Path
+
+# 必须在导入 embedding_functions 之前设置
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+from chromadb.utils import embedding_functions
 
 # ===== 配置路径 =====
 DB_PATH = Path(__file__).parent.parent / "chroma_db"
@@ -9,20 +14,30 @@ VOICE_FILE = Path(__file__).parent / "knowledge" / "furina_dialogue.txt"
 # ===== 连接 ChromaDB =====
 chroma_client = chromadb.PersistentClient(path=str(DB_PATH))
 
-# 如果旧集合数据错误，先删除再重建
+# ===== 彻底删除旧集合（绕过 embedding 锁定） =====
 try:
     chroma_client.delete_collection("furina_voice")
     print("已删除旧的 furina_voice 集合")
-except Exception:
-    pass
+except Exception as e:
+    print(f"删除旧集合时忽略: {e}")
 
-collection = chroma_client.get_or_create_collection("furina_voice")
+# ===== 创建中文嵌入函数 =====
+embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name="D:\\models\\bge-small-zh-v1.5"
+)
+
+
+# ===== 创建新集合（必须一次性同时指定 name 和 embedding_function） =====
+collection = chroma_client.create_collection(
+    name="furina_voice",
+    embedding_function=embedding_func
+)
+print("已创建新的 furina_voice 集合（中文嵌入）")
 
 # ===== 读取文本 =====
 text = VOICE_FILE.read_text(encoding="utf-8")
 
 # ===== 核心分割：只依赖 ## 标题，不依赖空行 =====
-# 按 "##" 切分，第一个片段前的空内容会被 strip 掉
 parts = text.split("##")
 chunks = []
 
@@ -30,7 +45,6 @@ for part in parts:
     part = part.strip()
     if not part:
         continue
-    # 把 ## 补回去，因为 split 会吃掉它
     chunk = "##" + part
     chunks.append(chunk)
 
@@ -48,4 +62,4 @@ collection.upsert(
 )
 
 print("✅ 芙宁娜语音台词知识库构建完成！")
-# 该代码块作用：按 ## 标题分割语音台词文本，不依赖空行格式，将每个场景片段存入 ChromaDB
+# 该代码块作用：彻底删除旧集合后，用中文嵌入模型重建，避免 embedding 函数冲突
