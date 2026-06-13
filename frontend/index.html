@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>芙宁娜的茶话会</title>
+    <style>
+        :root {
+            --bg: #0a1628;
+            --surface: #0f2035;
+            --gold: #c9a058;
+            --water: #5b8cba;
+            --text: #e0e8f0;
+            --bubble-user: #1a3548;
+            --bubble-furina: #12243a;
+            --border: #c9a05833;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', 'Noto Serif SC', '宋体', serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #app {
+            width: 100%;
+            max-width: 700px;
+            height: 90vh;
+            display: flex;
+            flex-direction: column;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: 0 0 30px rgba(201, 160, 88, 0.15);
+            overflow: hidden;
+            position: relative;
+        }
+        header {
+            background: linear-gradient(135deg, #0f2035 0%, #12243a 100%);
+            padding: 1.2rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            text-align: center;
+        }
+        header h1 {
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: var(--gold);
+            letter-spacing: 2px;
+        }
+        header p {
+            font-size: 0.8rem;
+            color: var(--water);
+            margin-top: 4px;
+            font-style: italic;
+        }
+        #chatlog {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            background: radial-gradient(circle at top, #132238 0%, #0a1628 100%);
+        }
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 85%;
+            animation: fadeIn 0.2s ease-out;
+        }
+        .user {
+            align-self: flex-end;
+        }
+        .furina {
+            align-self: flex-start;
+        }
+        .bubble {
+            padding: 0.8rem 1.1rem;
+            border-radius: 18px;
+            line-height: 1.6;
+            font-size: 0.95rem;
+            word-break: break-word;
+            white-space: pre-wrap;
+            position: relative;
+        }
+        .user .bubble {
+            background: var(--bubble-user);
+            border-bottom-right-radius: 4px;
+            color: #cfddee;
+            border: 1px solid #2c4a62;
+        }
+        .furina .bubble {
+            background: var(--bubble-furina);
+            border-bottom-left-radius: 4px;
+            border: 1px solid var(--border);
+            color: #ece4d5;
+        }
+        .furina .bubble::before {
+            content: "🍵 ";  /* 用茶杯代替原来的符号 */
+            color: var(--gold);
+            font-size: 0.8rem;
+        }
+        .sender {
+            font-size: 0.7rem;
+            margin: 4px 8px;
+            color: var(--water);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .user .sender { text-align: right; }
+        .furina .sender { text-align: left; }
+        #input-area {
+            display: flex;
+            padding: 1rem;
+            gap: 0.6rem;
+            background: #0c1c2e;
+            border-top: 1px solid var(--border);
+        }
+        #messageInput {
+            flex: 1;
+            padding: 0.8rem 1rem;
+            background: #12243a;
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            color: var(--text);
+            font-size: 0.9rem;
+            outline: none;
+            transition: border 0.2s;
+        }
+        #messageInput:focus {
+            border-color: var(--gold);
+        }
+        #sendBtn {
+            background: linear-gradient(135deg, #c9a058 0%, #b8923e 100%);
+            border: none;
+            border-radius: 24px;
+            padding: 0 1.4rem;
+            color: #0a1628;
+            font-weight: bold;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            font-size: 0.9rem;
+        }
+        #sendBtn:hover {
+            opacity: 0.9;
+        }
+        #sendBtn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .status-indicator {
+            text-align: center;
+            font-size: 0.7rem;
+            color: var(--water);
+            margin-top: 4px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <header>
+        <h1>🍰 芙宁娜的茶话会</h1>
+        <p>一杯红茶，几句闲谈，枫丹的午后时光</p>
+    </header>
+    <div id="chatlog">
+        <!-- 消息会动态插入 -->
+        <div class="message furina">
+            <span class="sender">芙宁娜</span>
+            <div class="bubble">欢迎来到我的茶会，亲爱的子民。坐下喝杯红茶，告诉我今天想聊些什么？</div>
+        </div>
+    </div>
+    <div style="padding: 0 1rem;">
+        <div class="status-indicator" id="statusText">🟢 谕示枢机在线</div>
+    </div>
+    <div id="input-area">
+        <input type="text" id="messageInput" placeholder="在茶话会上畅所欲言…" autocomplete="off" />
+        <button id="sendBtn">发送</button>
+    </div>
+</div>
+
+<script>
+    (function() {
+        // ==================== 配置 ====================
+        // 后端地址，根据你的实际情况修改
+        const API_BASE = 'http://127.0.0.1:8765';
+
+        // DOM 元素
+        const chatlog = document.getElementById('chatlog');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusText = document.getElementById('statusText');
+
+        // 状态
+        let isWaiting = false;
+
+        // ==================== 工具函数 ====================
+        function appendMessage(role, text) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+            const senderName = role === 'user' ? '你' : '芙宁娜';
+            msgDiv.innerHTML = `
+                <span class="sender">${senderName}</span>
+                <div class="bubble">${escapeHtml(text)}</div>
+            `;
+            chatlog.appendChild(msgDiv);
+            scrollToBottom();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function scrollToBottom() {
+            chatlog.scrollTop = chatlog.scrollHeight;
+        }
+
+        function setStatus(connected) {
+            statusText.innerHTML = connected
+                ? '🟢 茶话会在线中'
+                : '🔴 茶会暂时中断';
+        }
+
+        // ==================== API 调用 ====================
+        async function sendMessage(message) {
+            if (isWaiting) return;
+            isWaiting = true;
+            sendBtn.disabled = true;
+
+            // 显示用户消息
+            appendMessage('user', message);
+
+            try {
+                const response = await fetch(`${API_BASE}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+
+                const data = await response.json();
+                appendMessage('furina', data.reply || '(芙宁娜端起茶杯，微微一笑)');
+                setStatus(true);
+            } catch (error) {
+                console.error('请求失败:', error);
+                appendMessage('furina', '茶壶里的水似乎凉了… 请稍等片刻。');
+                setStatus(false);
+            } finally {
+                isWaiting = false;
+                sendBtn.disabled = false;
+                messageInput.focus();
+            }
+        }
+
+        // ==================== 事件绑定 ====================
+        sendBtn.addEventListener('click', () => {
+            const text = messageInput.value.trim();
+            if (!text) return;
+            messageInput.value = '';
+            sendMessage(text);
+        });
+
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendBtn.click();
+            }
+        });
+
+        // ==================== 初始检查后端状态 ====================
+        async function checkHealth() {
+            try {
+                const resp = await fetch(`${API_BASE}/`);
+                if (resp.ok) {
+                    setStatus(true);
+                } else {
+                    setStatus(false);
+                }
+            } catch (e) {
+                setStatus(false);
+            }
+        }
+        checkHealth();
+    })();
+</script>
+</body>
+</html>
