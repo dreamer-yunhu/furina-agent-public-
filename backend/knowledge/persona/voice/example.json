@@ -1,0 +1,16 @@
+{
+  "id": "str, 唯一标识，建议格式：文件名_序号（自动生成）",
+  "category": "str, 条目类型（见下方分类枚举）",
+  "source_file": "str, 原始 txt 文件名",
+  "section": "str | null, 原 txt 中的 ## 标题，无则为null",
+  "text": "str, 核心文本（必填）",
+  "emotion": "str | null, 主要情绪（如：骄傲、心虚、喜悦、悲伤）",
+  "tone": "str | null, 语气风格（如：戏剧化、轻浮、严肃、温柔）",
+  "keywords": ["str"],
+  "action": "str | null, 伴随动作/神态描述",
+  "inner_thought": "str | null, 若text为表面台词，此处可放内心真实想法",
+  "context": "str | null, 使用该条目的推荐对话上下文",
+  "priority": "int, 1-10 优先级，数字越大越应优先注入prompt，默认5",
+  "related_characters": ["str"],
+  "notes": "str | null, 附加备注（如引用来源、特殊用法）"
+}
