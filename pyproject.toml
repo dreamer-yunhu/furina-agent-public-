@@ -6,7 +6,9 @@ dependencies = [
     "dotenv==0.9.9",
     "fastapi>=0.139.0",
     "httpx>=0.28.1",
+    "logging>=0.4.9.6",
     "openai>=0.28.1",
     "pydantic>=2.13.4",
+    "redis[hiredis]>=8.0.1",
     "uvicorn==0.50.2",
 ]
