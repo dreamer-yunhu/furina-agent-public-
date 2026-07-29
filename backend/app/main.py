@@ -1,9 +1,24 @@
 from fastapi import FastAPI
-from app.routers import chat
+from app.schemas import model
+from sqlmodel import SQLModel
+from app.routers import router as rt
 import logging
+from contextlib import asynccontextmanager
+from app.core.database import engine
+
+#建表操作
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    yield
+    await engine.dispose()
 #定义FastAPI实例
-app = FastAPI(title = "芙宁娜agent")
-app.include_router(chat.router) #挂载路由
+app = FastAPI(title = "芙宁娜agent",lifespan=lifespan)
+app.include_router(rt.router) #挂载路由
+
+
+
 #定义测试接口
 @app.get("/")
 async def root():

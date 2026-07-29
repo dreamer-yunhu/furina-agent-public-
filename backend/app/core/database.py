@@ -5,9 +5,23 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from app.core.config import settings
 
 
-engine = create_async_engine(settings.pg_url,echo=False)
-AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-# FastAPI 每次请求进来，就从连接池拿一个“会话” (独立访问冰箱的通道)
-async def get_db():
-    async with AsyncSessionLocal() as session:
+#创建连接池
+engine = create_async_engine(
+    settings.pg_url,
+    pool_pre_ping=True, #测试连接是否活跃
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=360
+)
+
+#创建会话工厂类
+async_session = async_sessionmaker(
+    bind=engine,
+    expire_on_commit=False,
+)
+
+#生成对话
+async def get_session() -> AsyncSession:
+    async with async_session() as session:
         yield session
