@@ -2,16 +2,24 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import hash_password
-from app.models.table import User,Conversation
-from app.schemas.model import UserCreate, ConservationCreate,PasswordReset
+from app.models.table import User, Conversation, Message
+from app.schemas.model import UserCreate, ConservationCreate, PasswordReset, MessageCreate
+
 logger = logging.getLogger(__name__)
 
 #定义查询用户函数
 async def get_user_by_name(session: AsyncSession,username:str) -> User:
     query = await session.execute(select(User).where(User.user_name ==username))
     user = query.scalar_one_or_none()
-    logger.debug("用户信息查询功能正常")
+    logger.debug("用户信息查询功能正常（名称查询）")
     return user
+
+async def get_user_by_id(session: AsyncSession,uuid:str) -> User:
+    query = await session.execute(select(User).where(User.id == uuid))
+    user = query.scalar_one_or_none()
+    logger.debug("用户信息查询功能正常（id查询）")
+    return user
+
 
 #定义写入注册信息函数
 async def user_create(session:AsyncSession,inform:UserCreate):
@@ -53,4 +61,33 @@ async def create_conservation(session: AsyncSession,inform:ConservationCreate):
     await session.commit()
     await session.refresh(new_conservation)
     logger.debug("会话创建函数正常")
-    return new_conservation
+    return True
+
+#定义用户消息历储存函数
+async def save_user_messages_records(session:AsyncSession,inform:MessageCreate):
+    new_user_message = Message(
+        content = inform.contents,
+        conversation_id = 1 #占位的
+    )
+    session.add(new_user_message)
+    await session.commit()
+    await session.refresh(new_user_message)
+    logger.debug("对话历史正常存储")
+    return True
+
+#定义大模型回复消息存储函数
+async def save_llm_messages_records(session:AsyncSession,inform:MessageCreate):
+    new_llm_message = Message(
+        role = inform.role.ASSISTANT,
+        content = inform.contents,
+        conversation_id = 1 #占位的
+    )
+    session.add(new_llm_message)
+    await session.commit()
+    await session.refresh(new_llm_message)
+    logger.debug("大模型回复存储正常")
+    return True
+
+#定义获取大模型历史回复消息函数
+async def get_llm_messages(session:AsyncSession,):
+    pass

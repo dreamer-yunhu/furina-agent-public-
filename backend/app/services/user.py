@@ -1,5 +1,5 @@
 import logging
-from fastapi import HTTPException,status
+from fastapi import HTTPException,status, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.table import User
 from app.repositories.crud import get_user_by_name, user_create, reset_pwd
@@ -19,9 +19,16 @@ async def user_register(inform :UserCreate,session:AsyncSession)->User:
     return new_user
 
 
+async def get_login_from_form(
+    username: str = Form(...),   # ← 从 Swagger 的表单里拿用户名
+    password: str = Form(...)    # ← 从 Swagger 的表单里拿密码
+) -> UserLogin:
+    # 这一行会触发 Pydantic 校验（长度、空格等），校验不过自动报 422
+    return UserLogin(username=username, password=password)
+
 
 #开始进行登录操作，密钥分发等待
-async def user_login(inform :UserLogin,session:AsyncSession):
+async def user_login(*,session:AsyncSession,inform :UserLogin):
     user = await get_user_by_name(session,inform.username)
     if not user:
         raise HTTPException(status_code=400, detail="Incorrect username or password")

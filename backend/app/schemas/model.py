@@ -59,11 +59,16 @@ class ConservationCreate(BaseModel):
 #定义创建消息的信息模型
 class MessageCreate(BaseModel):
     contents : str
-    role: MessageRole = Field(default=MessageRole.USER,max_length=255)
+    role: MessageRole = Field(default=MessageRole.USER)
 
+#定义校验数据模型
+class LoginFormData(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^\S+$")
+    password: str = Field(min_length=6, max_length=128)
 
-
-
+#定义查询大模型对话历史返回模型
+class LlmHistory(BaseModel):
+    contents : str
 
 
 

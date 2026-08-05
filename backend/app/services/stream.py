@@ -37,6 +37,9 @@ async def stream_chat(request:ChatRequest):
                 full_text += content
                 #向前端返还符合SSE协议的消息
                 yield f"data: {json.dumps({'reply':content,'status':'generating'})}\n\n"
+
+        #相应完成立刻存储进入redis
+
         #向前端传递消息发完的信号
         yield f"data: {json.dumps({'status':'done'})}\n\n"
         logger.info("流式响应正常结束")
