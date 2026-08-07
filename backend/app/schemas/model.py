@@ -37,6 +37,7 @@ class UserLogin(BaseModel):
 class UserOut(BaseModel):
     id : str
     username : str = Field(max_length=255)
+    session_id : str
     personal_preference: str | None =Field(default=None)
 
 
@@ -53,7 +54,7 @@ class PasswordReset(BaseModel):
     new_password : str = Field(min_length=8,max_length=128)
 
 #定义创建会话时需要提供的信息模型
-class ConservationCreate(BaseModel):
+class ConversationCreate(BaseModel):
     title : str = Field(max_length=255)
 
 #定义创建消息的信息模型
@@ -70,6 +71,14 @@ class LoginFormData(BaseModel):
 class LlmHistory(BaseModel):
     contents : str
 
+#定义接收修改会话标题数据模型
+class RenameConversation(BaseModel):
+    title : str = Field(max_length=255)
 
+#定义通过刷新令牌获取新访问令牌的模型
+class RefreshTokenRequest(BaseModel):
+    refresh_token : str
 
-
+#定义登出接口获取刷新令牌模型
+class LogoutRequest(BaseModel):
+    refresh_token : str

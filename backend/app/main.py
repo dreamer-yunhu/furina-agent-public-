@@ -1,13 +1,19 @@
 from fastapi import FastAPI
 from app.core.lifespan import app_lifespan
-from app.routers import router as rt
+from app.routers import auth, user, chat, knowledge, asset, ws
 import logging
 
 
 
 #定义FastAPI实例
 app = FastAPI(title = "芙宁娜agent",lifespan=app_lifespan)
-app.include_router(rt.router) #挂载路由
+#挂载各业务领域子路由
+app.include_router(auth.router)      # 认证
+app.include_router(user.router)      # 用户
+app.include_router(chat.router)      # 聊天
+app.include_router(knowledge.router) # 知识库（预留）
+app.include_router(asset.router)     # 资源（预留）
+app.include_router(ws.router)        # WebSocket（预留）
 
 
 

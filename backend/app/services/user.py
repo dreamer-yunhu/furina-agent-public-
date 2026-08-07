@@ -1,10 +1,16 @@
 import logging
+import time
+import uuid
 from fastapi import HTTPException,status, Form
+from redis import asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.table import User
-from app.repositories.crud import get_user_by_name, user_create, reset_pwd
+from app.repositories.redis_user import jwt_block_list, is_blocklisted, register_session, \
+    is_current_session, clear_session
+from app.repositories.user import get_user_by_name, user_create, reset_pwd
 from app.schemas.model import UserCreate, UserLogin, UserOut, LoginResponse, PasswordReset
-from app.core.security import verify_password, create_access_token, create_refresh_token
+from app.core.security import verify_password, create_access_token, create_refresh_token,decode_token
+
 
 logger = logging.getLogger(__name__)
 
@@ -28,29 +34,38 @@ async def get_login_from_form(
 
 
 #开始进行登录操作，密钥分发等待
-async def user_login(*,session:AsyncSession,inform :UserLogin):
+async def user_login(*,session:AsyncSession,inform :UserLogin,redis:aioredis.Redis):
     user = await get_user_by_name(session,inform.username)
     if not user:
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect username or password")
+
     #开启登录
     if verify_password(inform.password,user.hashed_password):
+
+        # 发一个全局登录在线有效会话的uuid
+        session_id = uuid.uuid4()
+        # 登记会话（覆盖旧会话 = 顶号）
+        await register_session(redis, str(user.id), str(session_id))
         #进行令牌
         access_token = create_access_token(
             user_id = user.id,
-            user_name=user.user_name
+            user_name=user.user_name,
+            session_id = session_id
         )
         #设置刷新令牌
         refresh_token = create_refresh_token(
             user_id = user.id,
-            user_name=user.user_name
+            user_name=user.user_name,
+            session_id=session_id
         )
-        print(user.personal_preference)
+        #print(user.personal_preference)
         return LoginResponse(
                 access_token = access_token,
                 refresh_token = refresh_token,
                 user= UserOut(
                     id = str(user.id),
                     username= user.user_name,
+                    session_id = str(session_id),
                     personal_preference = user.personal_preference
                 )
                 )
@@ -58,11 +73,108 @@ async def user_login(*,session:AsyncSession,inform :UserLogin):
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect username or password")
 
+#定义用户登出函数
+async def user_logout(*,access_token : str,refresh_token:str,redis : aioredis.Redis):
+    # 解码令牌
+    try:#因为访问令牌可能过期，如果过期之后执行登出操作显示登出失败，登出应该是一个无论令牌状况如何都成功的操作
+        access_payload = decode_token(access_token)
+
+    except HTTPException:
+        access_payload = None
+
+    try:  # 因为刷新令牌可能过期，如果过期之后执行登出操作显示登出失败，登出应该是一个无论令牌状况如何都成功的操作
+        refresh_payload = decode_token(refresh_token)
+
+    except HTTPException:
+        refresh_payload = None
+
+    #归属校验——执行登出操作的必须是用户本人！
+    if access_payload and refresh_payload:
+        if access_payload.get("sub") != refresh_payload.get("id"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="访问和刷新令牌用户id不符合！")
+    #把访问令牌加入redis黑名单——令牌存在开启拉黑操作
+    if access_payload:
+        access_jti =access_payload.get("jti") #获得访问令牌全局uuid
+        #校验access_jti
+        if not access_jti:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效访问令牌")
+        access_ttl = max(0,int(access_payload.get("exp",0)) - int(time.time())) #保证时间不为复数
+        await jwt_block_list(redis,access_jti,access_ttl) #把访问加入redis黑名单
+
+
+    #把刷新令牌加入黑名单——令牌存在开启拉黑操作
+    if refresh_payload:
+        if refresh_payload.get("type") != "refresh":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="请使用刷新令牌！")
+        refresh_jti = refresh_payload.get("jti")
+        #校验refresh_token
+        if not refresh_jti:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效刷新令牌")
+        refresh_ttl = max(0,int(refresh_payload.get("exp",0))-int(time.time()))
+        await jwt_block_list(redis,refresh_jti,refresh_ttl)
+
+    #撤销会话登记（用 access 里的 sub 拿 user_id）
+    if access_payload:
+        user_id = access_payload.get("sub")
+        if user_id:
+            await clear_session(redis,user_id)
+
+    #返回结果
+    return {"success":True}
+
+
 #写更改密码接口
-async def password_reset(inform:PasswordReset,session:AsyncSession)->str:
+async def password_reset(inform:PasswordReset,session:AsyncSession)->bool:
     user = await get_user_by_name(session, inform.username)
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User does not exist")
     #改密码
     result = await reset_pwd(session,inform)
     return result
+
+#定义通过刷新令牌获取新同行令牌函数
+async def user_refresh(refresh_token:str,redis: aioredis.Redis):
+    #1解码
+    payload = decode_token(refresh_token)
+    #2鉴别token类型
+    if payload.get("type",None) != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="请使用刷新令牌")
+    #发一个新的令牌（刷新，访问）
+    user_id =payload.get("id")
+    user_name = payload.get("name")
+    jti =payload.get("jti")
+    session_id = payload.get("session_id")
+
+    #判断用户id是否存在
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效用户id！")
+    #判断用户名称是否存在
+    if not user_name:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效用户名称！")
+    #判断令牌是否有效——存在
+    if not jti:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效令牌！")
+    #判断会话id是否存在
+    if not session_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效会话id！")
+    #判断当前刷新令牌是否在黑名单中
+    if await is_blocklisted(redis,jti):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="令牌位于黑名单中！")
+
+    #判断会话id是否为当前会话id
+    if not await is_current_session(redis,session_id,user_id):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="会话id与当前会话id不符")
+    #不在黑名单发令牌和session是当前的
+    access_token = create_access_token(uuid.UUID(user_id),user_name,uuid.UUID(session_id))
+    refresh_token = create_refresh_token(uuid.UUID(user_id),user_name,uuid.UUID(session_id))
+
+    #把旧的访问令牌uuid加入redis黑名单
+    ttl = max(int(payload.get("exp",0)) - int(time.time()),0)
+    await jwt_block_list(redis,jti,ttl)
+    return {
+        "access_token":access_token,
+        "refresh_token":refresh_token,
+    }
+
+
+

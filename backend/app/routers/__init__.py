@@ -1,3 +1,6 @@
 """
-该包是这个系统的”服务员”，用于定义接口形式响应请求，不写业务逻辑
+路由包：各业务领域的子路由模块在此导出，main.py 逐个挂载
 """
+from app.routers import auth, user, chat, knowledge, asset, ws
+
+__all__ = ["auth", "user", "chat", "knowledge", "asset", "ws"]

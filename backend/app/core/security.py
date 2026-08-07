@@ -31,9 +31,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 #定义JWT令牌生成函数
 #1 定义载荷生成函数->payload
-def create_jwt(payload: dict, expires_delta: timedelta, token_type: str) -> str:
+def create_jwt(payload: dict, expires_delta: timedelta, token_type: str,session_id:uuid.UUID) -> str:
     """
     定义令牌模板
+    :param session_id: 会话记录全局uuid（登录状态标识符），用户登录时会自动覆盖上一次的
     :param payload:载荷
     :param expires_delta:过期时间
     :param token_type:令牌类型
@@ -46,15 +47,17 @@ def create_jwt(payload: dict, expires_delta: timedelta, token_type: str) -> str:
         "jti": str(uuid.uuid4()),  #全局唯一id
         "iat": now,  #签发时间
         "exp": now + expires_delta,  #过期时间
+        "session_id":str(session_id)
     })
     #返还令牌模板
     return jwt.encode(to_encode, settings.jwt_key, algorithm=settings.jwt_algo)
 
 
 #2 定义访问令牌
-def create_access_token(user_id: uuid.UUID, user_name: str) -> str:
+def create_access_token(user_id: uuid.UUID, user_name: str,session_id:uuid.UUID) -> str:
     """
     签发访问令牌
+    :param session_id: 会话记录全局uuid（登录状态标识符），用户登录时会自动覆盖上一次的
     :param user_id: 用户唯一全局uuid
     :param user_name: 用户名
     :return: 返还访问令牌
@@ -62,15 +65,17 @@ def create_access_token(user_id: uuid.UUID, user_name: str) -> str:
     token = create_jwt(
         payload={"sub": str(user_id), "name": user_name},
         token_type="access",
+        session_id = str(session_id),
         expires_delta=timedelta(seconds=settings.access_token_expire_seconds),
     )
     return token
 
 
 #3 定义刷新令牌
-def create_refresh_token(user_id: uuid.UUID, user_name: str) -> str:
+def create_refresh_token(user_id: uuid.UUID, user_name: str,session_id:uuid.UUID) -> str:
     """
     刷新令牌生成函数
+    :param session_id: 会话记录全局uuid（登录状态标识符），用户登录时会自动覆盖上一次的
     :param user_id: 用户唯一全局uuid
     :param user_name: 用户名
     :return: 返还刷新令牌
@@ -78,6 +83,7 @@ def create_refresh_token(user_id: uuid.UUID, user_name: str) -> str:
     token_ = create_jwt(
         payload={"id": str(user_id), "name": user_name},
         token_type="refresh",
+        session_id = str(session_id),
         expires_delta=timedelta(days=settings.refresh_token_expire_days),
     )
 

@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.31.0",
     "bcrypt>=5.0.0",
+    "booktype>=1.5",
     "dotenv==0.9.9",
     "fastapi>=0.139.0",
     "httpx>=0.28.1",
