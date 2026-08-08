@@ -5,8 +5,10 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from redis import asyncio as aioredis
 from app.core.database import get_session
 from app.auth.dependencies import get_current_user
+from app.core.redis_client import get_redis
 from app.models.table import User
 from app.schemas.model import ChatRequest, ConversationCreate, RenameConversation
 from app.services.stream import stream_chat
@@ -20,8 +22,19 @@ router = APIRouter(prefix="/chat", tags=["聊天"])
 
 
 @router.post("")
-async def chat(request: ChatRequest):
-    return StreamingResponse(stream_chat(request), media_type="text/event-stream")
+async def chat(request: ChatRequest,
+               user:User = Depends(get_current_user),
+               session:AsyncSession = Depends(get_session),
+               redis:aioredis.Redis = Depends(get_redis)
+               ):
+    cov = await get_owned_conversation(session,current_user=user,conversation_id=uuid.UUID(request.chat_session_id))
+    return StreamingResponse(stream_chat(request=request,
+                                         session=session,
+                                         redis = redis,
+                                         conv = cov
+                                         ),
+                             media_type="text/event-stream"
+                             )
 
 
 #---------- 会话管理（外键 user_id 来自 get_current_user） ----------

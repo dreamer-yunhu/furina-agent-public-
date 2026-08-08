@@ -2,18 +2,62 @@
 用于启动流式响应,顺手写入数据库
 """
 import json
+import uuid
 import logging
+from sqlalchemy.ext.asyncio import AsyncSession
+from redis import asyncio as aioredis
 from app.core.config import deepseek_client
-from app.schemas.model import ChatRequest
+from app.models.table import Conversation
+from app.repositories.message import list_recent_messages, save_message
+from app.repositories.redis_user import get_hot_message, save_hot_message
+from app.schemas.model import ChatRequest, MessageRole
 from app.prompts.furina import SYSTEM_PROMPT
 from openai import (
     AuthenticationError, RateLimitError, BadRequestError,
     APIConnectionError, APITimeoutError, InternalServerError, APIError
 )
+
+
 logger = logging.getLogger(__name__) #为该模块配置日志
 
-#定义异步函数生成器
-async def stream_chat(request:ChatRequest):
+#定义多轮对话函数
+async def stream_chat(*,request:ChatRequest,
+                      session:AsyncSession,
+                      redis:aioredis.Redis,
+                      conv:Conversation
+                      ):
+    #获取历史会话记录
+    history = await get_hot_message(redis,str(conv.id))
+
+    if not history:
+        pg_msg = list_recent_messages(
+            session=session,
+            conversation_id=conv.id
+        )
+        history= [{"role":m.role,"content":m.content} for m in pg_msg]
+    #存储用户消息
+    #先存redis
+    await save_hot_message(
+        redis = redis,
+        conv_id= str(conv.id),
+        role = MessageRole.USER,
+        content = request.user_input
+    )
+    #在存入PG
+    await save_message(
+        session,
+        conversation_id=conv.id,
+        role = MessageRole.USER,
+        content = request.user_input
+    )
+
+    #拼接prompt
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in history:
+        messages.append({"role":msg.get("role"),"content":msg.get("content")})
+    user_message = {"role":"user","content":request.user_input}
+    messages.append(user_message )
+
     #利用client客户端发送http请求给模型并开启流式响应
     #sdk返还一个可迭代的封装对象
     logger.info("启动流式响应")
@@ -21,10 +65,7 @@ async def stream_chat(request:ChatRequest):
     try:
         stream = await deepseek_client.chat.completions.create(
             model = request.model,
-            messages = [
-                {"role":"system","content":SYSTEM_PROMPT},
-                {"role":"user","content":request.user_input}
-            ],
+            messages = messages,
             max_tokens = request.max_tokens,
             stream = True,#核心，提示模型开启流式响应
         )
@@ -38,12 +79,27 @@ async def stream_chat(request:ChatRequest):
                 #向前端返还符合SSE协议的消息
                 yield f"data: {json.dumps({'reply':content,'status':'generating'})}\n\n"
 
-        #相应完成立刻存储进入redis
-
+        #相应完成立刻先存储进入redis再存PG
+        if full_text:
+            #先存redis
+            await save_hot_message(
+                redis=redis,
+                conv_id=str(conv.id),
+                role=MessageRole.ASSISTANT,
+                content=full_text
+            )
+            #再存入PG
+            await save_message(
+                session,
+                conversation_id=conv.id,
+                role =MessageRole.ASSISTANT,
+                content = full_text
+            )
         #向前端传递消息发完的信号
         yield f"data: {json.dumps({'status':'done'})}\n\n"
         logger.info("流式响应正常结束")
-        
+
+
     #进行异常捕获，注意，异常捕获的时候，从具体到抽象
     except AuthenticationError:
         logging.exception("API密钥无效！！！")

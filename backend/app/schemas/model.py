@@ -10,10 +10,10 @@ from enum import Enum
 
 #定义接收数据模型
 class ChatRequest(BaseModel):
-    model : str = "deepseek-v4-pro"
+    model : str = "deepseek-v4-flash"
     max_tokens : int = 1000
     user_input : str
-    session_id : str = "default"
+    chat_session_id : str
 
 #定义枚举模型
 class MessageRole(str,Enum):

@@ -27,6 +27,6 @@ class Settings:
         self.jwt_key = os.getenv("JWT_SECRET_KET")
         self.jwt_algo = os.getenv("JWT_ALGO")
         self.access_token_expire_seconds= 3600
-        self.refresh_token_expire_days = 2
+        self.refresh_token_expire_days = 30
 settings = Settings()
 

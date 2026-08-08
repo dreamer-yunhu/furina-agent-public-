@@ -65,7 +65,7 @@ def create_access_token(user_id: uuid.UUID, user_name: str,session_id:uuid.UUID)
     token = create_jwt(
         payload={"sub": str(user_id), "name": user_name},
         token_type="access",
-        session_id = str(session_id),
+        session_id = session_id,
         expires_delta=timedelta(seconds=settings.access_token_expire_seconds),
     )
     return token
@@ -83,7 +83,7 @@ def create_refresh_token(user_id: uuid.UUID, user_name: str,session_id:uuid.UUID
     token_ = create_jwt(
         payload={"id": str(user_id), "name": user_name},
         token_type="refresh",
-        session_id = str(session_id),
+        session_id = session_id,
         expires_delta=timedelta(days=settings.refresh_token_expire_days),
     )
 

@@ -4,10 +4,6 @@ from sqlmodel import SQLModel,Field,Relationship,DateTime,Text
 from app.schemas.model import MessageRole
 
 
-
-
-
-
 #定义工厂函数
 def get_datetime_utc() -> datetime:
     return datetime.now(UTC)
