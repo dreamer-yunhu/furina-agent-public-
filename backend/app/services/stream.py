@@ -2,11 +2,14 @@
 用于启动流式响应,顺手写入数据库
 """
 import json
-import uuid
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis import asyncio as aioredis
+from redis.exceptions import RedisError
+from app.core.redis_fuse import CircuitOpenError
 from app.core.config import deepseek_client
+from app.core.redis_fuse import RedisFuse
+from app.core.fuse_helpers import fuse_fail_open
 from app.models.table import Conversation
 from app.repositories.message import list_recent_messages, save_message
 from app.repositories.redis_user import get_hot_message, save_hot_message
@@ -24,24 +27,34 @@ logger = logging.getLogger(__name__) #为该模块配置日志
 async def stream_chat(*,request:ChatRequest,
                       session:AsyncSession,
                       redis:aioredis.Redis,
+                      fuse:RedisFuse,
                       conv:Conversation
                       ):
     #获取历史会话记录
-    history = await get_hot_message(redis,str(conv.id))
-
+    #走熔断器读 Redis 热缓存；Redis 挂了/熔断 → 降级走 PG
+    history = await fuse_fail_open(fuse,get_hot_message,[],redis,str(conv.id),action="从redis中读取历史记录")
+    #会话开始时从PG取最新30条消息存入redis
     if not history:
-        pg_msg = list_recent_messages(
+        pg_msg = await list_recent_messages(
             session=session,
             conversation_id=conv.id
         )
+        #回填 Redis（走熔断器；Redis 挂了只记日志，不阻塞主流程）
+        for m in pg_msg:
+            #action 必须是关键字参数，写在位置区会被 *args 吞掉并多传一个位置参数
+            if not await fuse_fail_open(fuse, save_hot_message, None,
+                                        redis, str(conv.id), m.role, m.content,
+                                        action="将PG中数据回填redis"):
+                logger.warning("Redis 不可用，PG 回填 Redis 已跳过")
+                break
+        #拼接历史消息
         history= [{"role":m.role,"content":m.content} for m in pg_msg]
     #存储用户消息
-    #先存redis
-    await save_hot_message(
-        redis = redis,
-        conv_id= str(conv.id),
-        role = MessageRole.USER,
-        content = request.user_input
+    #先存redis（走熔断器；Redis 挂了只记日志，PG 才是主存储）
+
+    await fuse_fail_open(
+        fuse,save_hot_message,None,
+        redis,str(conv.id),MessageRole.USER.value,request.user_input,action="将用户消息存入redis"
     )
     #在存入PG
     await save_message(
@@ -81,13 +94,10 @@ async def stream_chat(*,request:ChatRequest,
 
         #相应完成立刻先存储进入redis再存PG
         if full_text:
-            #先存redis
-            await save_hot_message(
-                redis=redis,
-                conv_id=str(conv.id),
-                role=MessageRole.ASSISTANT,
-                content=full_text
-            )
+            #先存redis（走熔断器；Redis 挂了只记日志，PG 才是主存储）
+            await fuse_fail_open(fuse,save_hot_message,None,
+                                 redis, str(conv.id),
+                                 MessageRole.ASSISTANT.value, full_text,action="将大模型回复存入redis")
             #再存入PG
             await save_message(
                 session,

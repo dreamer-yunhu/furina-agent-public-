@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis import asyncio as aioredis
 from app.core.database import get_session
 from app.auth.dependencies import get_current_user
-from app.core.redis_client import get_redis
+from app.core.redis_client import get_redis,get_redis_fuse
+from app.core.redis_fuse import RedisFuse
 from app.models.table import User
 from app.schemas.model import ChatRequest, ConversationCreate, RenameConversation
 from app.services.stream import stream_chat
@@ -25,12 +26,14 @@ router = APIRouter(prefix="/chat", tags=["聊天"])
 async def chat(request: ChatRequest,
                user:User = Depends(get_current_user),
                session:AsyncSession = Depends(get_session),
-               redis:aioredis.Redis = Depends(get_redis)
+               redis:aioredis.Redis = Depends(get_redis),
+               fuse:RedisFuse = Depends(get_redis_fuse)
                ):
     cov = await get_owned_conversation(session,current_user=user,conversation_id=uuid.UUID(request.chat_session_id))
     return StreamingResponse(stream_chat(request=request,
                                          session=session,
                                          redis = redis,
+                                         fuse = fuse,
                                          conv = cov
                                          ),
                              media_type="text/event-stream"

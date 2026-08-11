@@ -105,13 +105,15 @@ def decode_token(token: str) -> dict:
         )
         return token_data
     except jwt.ExpiredSignatureError as e:
-        logger.exception("JWT令牌过期", e)
+        #logger.exception(msg, e) 无 %s 占位符却传 e → logging 格式化二次抛错，真异常被吞
+        logger.exception("JWT令牌过期", exc_info=e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="令牌已过期"
         )
     except jwt.InvalidTokenError as e:
-        logger.exception("无效JWT令牌！", e)
+        #同前——msg 无 %s 却传 e，logging 二次炸，异常被掩盖
+        logger.exception("无效JWT令牌！", exc_info=e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效令牌"

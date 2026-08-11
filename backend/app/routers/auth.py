@@ -4,9 +4,10 @@
 from redis import asyncio as aioredis
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.auth.dependencies import oauth2_scheme, get_current_user
+from app.auth.dependencies import oauth2_scheme
 from app.core.database import get_session
-from app.core.redis_client import get_redis
+from app.core.redis_client import get_redis, get_redis_fuse
+from app.core.redis_fuse import RedisFuse
 from app.schemas.model import UserCreate, UserLogin, PasswordReset, RefreshTokenRequest, LogoutRequest
 from app.services.user import user_register, user_login, password_reset, get_login_from_form, user_logout, user_refresh
 
@@ -22,23 +23,32 @@ async def register(user: UserCreate, session: AsyncSession = Depends(get_session
 @router.post("/login")
 async def login(login_data: UserLogin = Depends(get_login_from_form),
                 session: AsyncSession = Depends(get_session),
-                redis:aioredis.Redis = Depends(get_redis)
+                redis:aioredis.Redis = Depends(get_redis),
+                fuse:RedisFuse = Depends(get_redis_fuse)
                 ):
-    return await user_login(session=session, inform=login_data,redis=redis)
+    return await user_login(session=session, inform=login_data,redis=redis,fuse=fuse)
 
 
 @router.post("/logout")
 async def logout(*,access_token = Depends(oauth2_scheme),
                  refresh_token:LogoutRequest,
-                 redis = Depends(get_redis),
+                 redis:aioredis.Redis = Depends(get_redis),
+                 fuse:RedisFuse = Depends(get_redis_fuse)
                  ):
-    result = await user_logout(access_token=access_token, refresh_token=refresh_token.refresh_token, redis=redis)
+    result = await user_logout(access_token=access_token,
+                               refresh_token=refresh_token.refresh_token,
+                               redis=redis,
+                               fuse = fuse
+                               )
     return result
 
 
 @router.post("/refresh")
-async def refresh_token(refresh_token : RefreshTokenRequest,redis:aioredis.Redis = Depends(get_redis)):
-    new_access_token = await user_refresh(refresh_token.refresh_token,redis)
+async def refresh_token(refresh_token : RefreshTokenRequest,
+                        redis:aioredis.Redis = Depends(get_redis),
+                        fuse:RedisFuse = Depends(get_redis_fuse)
+                        ):
+    new_access_token = await user_refresh(refresh_token.refresh_token,redis,fuse)
     return new_access_token
 
 

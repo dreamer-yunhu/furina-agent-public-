@@ -41,8 +41,12 @@ async def user_create(session: AsyncSession, inform: UserCreate) -> User:
         logger.debug("注册信息录入函数正常")
         return new_user
     except Exception as e:
-        logger.exception("注册功能异常", e)
+        #1-logger.exception(msg, e) 的 msg 无 %s 却传 e → logging 二次抛错被吞，真异常被掩盖
+        #2-except 缺 return → 函数返回 None → auth.py 崩在 None.id，把 400 伪装成 500
+        #修复：exc_info=e 传递异常，raise 让异常冒泡，由上层统一处理
+        logger.exception("注册功能异常", exc_info=e)
         await session.rollback()
+        raise
 
 
 async def reset_pwd(session: AsyncSession, inform: PasswordReset) -> bool:

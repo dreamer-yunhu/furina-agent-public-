@@ -5,7 +5,7 @@ import logging
 from redis import asyncio as aioredis
 from fastapi import FastAPI,Request
 from app.core.config import settings
-
+from app.core.redis_fuse import RedisFuse
 #配置日志
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,12 @@ async def init_redis(app:FastAPI):
         socket_timeout = 5.0
     )
     await redis.ping() #测试
+    #准备熔断器
+    redis_fuse = RedisFuse(redis)
     app.state.redis = redis #挂载
+    app.state.redis_fuse = redis_fuse #挂载熔断器
     logger.info("redis连接池已就绪")
+
 
 #应用关闭时关闭redis连接池
 async def close_redis(app:FastAPI):
@@ -48,3 +52,11 @@ async def get_redis(request:Request)->aioredis.Redis:
     """
     return request.app.state.redis
 
+#获取全局熔断器
+async def get_redis_fuse(request:Request)->RedisFuse:
+    """
+    依赖注入：从app.state获取全局唯一redis熔断器
+    :param request:
+    :return:
+    """
+    return request.app.state.redis_fuse

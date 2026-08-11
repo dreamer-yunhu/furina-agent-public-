@@ -49,7 +49,7 @@ class Conversation(SQLModel, table=True):
 #创建存储对话信息表格
 class Message(SQLModel, table=True):
     id : uuid.UUID = Field(default_factory=uuid.uuid4,primary_key=True)
-    role: MessageRole = Field(default=MessageRole.USER,max_length=255)
+    role: str = Field(default=MessageRole.USER.value,max_length=255)
     content: str = Field(sa_type=Text)
     created_at: datetime = Field(
         default_factory=get_datetime_utc,

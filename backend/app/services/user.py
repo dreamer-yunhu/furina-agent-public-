@@ -3,13 +3,16 @@ import time
 import uuid
 from fastapi import HTTPException,status, Form
 from redis import asyncio as aioredis
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.fuse_helpers import fuse_fail_closed
 from app.models.table import User
 from app.repositories.redis_user import jwt_block_list, is_blocklisted, register_session, \
     is_current_session, clear_session
 from app.repositories.user import get_user_by_name, user_create, reset_pwd
 from app.schemas.model import UserCreate, UserLogin, UserOut, LoginResponse, PasswordReset
 from app.core.security import verify_password, create_access_token, create_refresh_token,decode_token
+from app.core.redis_fuse import RedisFuse, CircuitOpenError
 
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,7 @@ async def get_login_from_form(
 
 
 #开始进行登录操作，密钥分发等待
-async def user_login(*,session:AsyncSession,inform :UserLogin,redis:aioredis.Redis):
+async def user_login(*,session:AsyncSession,inform :UserLogin,redis:aioredis.Redis,fuse:RedisFuse):
     user = await get_user_by_name(session,inform.username)
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect username or password")
@@ -45,7 +48,12 @@ async def user_login(*,session:AsyncSession,inform :UserLogin,redis:aioredis.Red
         # 发一个全局登录在线有效会话的uuid
         session_id = uuid.uuid4()
         # 登记会话（覆盖旧会话 = 顶号）
-        await register_session(redis, str(user.id), str(session_id))
+        try:
+            await fuse_fail_closed(fuse,register_session,redis,str(user.id),str(session_id),action="登记会话id")
+        except (RedisError,CircuitOpenError):
+            logger.error("登录链路：Redis 挂了——无法把会话登记到redis，向客户端返回 503")
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,detail="服务暂不可用,请稍后再试")
+
         #进行令牌
         access_token = create_access_token(
             user_id = user.id,
@@ -74,7 +82,7 @@ async def user_login(*,session:AsyncSession,inform :UserLogin,redis:aioredis.Red
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect username or password")
 
 #定义用户登出函数
-async def user_logout(*,access_token : str,refresh_token:str,redis : aioredis.Redis):
+async def user_logout(*,access_token : str,refresh_token:str,redis : aioredis.Redis,fuse:RedisFuse):
     # 解码令牌
     try:#因为访问令牌可能过期，如果过期之后执行登出操作显示登出失败，登出应该是一个无论令牌状况如何都成功的操作
         access_payload = decode_token(access_token)
@@ -99,7 +107,12 @@ async def user_logout(*,access_token : str,refresh_token:str,redis : aioredis.Re
         if not access_jti:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效访问令牌")
         access_ttl = max(0,int(access_payload.get("exp",0)) - int(time.time())) #保证时间不为复数
-        await jwt_block_list(redis,access_jti,access_ttl) #把访问加入redis黑名单
+        try:
+            await fuse_fail_closed(fuse,jwt_block_list,redis,access_jti,access_ttl,action="拉黑旧访问令牌") #把访问加入redis黑名单
+        except (RedisError,CircuitOpenError):
+            logger.error("登出链路：Redis 挂了——无法把旧访问令牌加入黑名单，向客户端返回 503")
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,detail="服务暂不可用,请稍后再试")
+
 
 
     #把刷新令牌加入黑名单——令牌存在开启拉黑操作
@@ -111,13 +124,23 @@ async def user_logout(*,access_token : str,refresh_token:str,redis : aioredis.Re
         if not refresh_jti:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效刷新令牌")
         refresh_ttl = max(0,int(refresh_payload.get("exp",0))-int(time.time()))
-        await jwt_block_list(redis,refresh_jti,refresh_ttl)
+        try:
+            await fuse_fail_closed(fuse,jwt_block_list,redis,refresh_jti,refresh_ttl,action="拉黑旧刷新令牌")
+        except (RedisError,CircuitOpenError):
+            logger.error("登出链路：Redis 挂了——无法把旧刷新令牌加入黑名单，向客户端返回 503")
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="服务暂不可用,请稍后再试")
+
 
     #撤销会话登记（用 access 里的 sub 拿 user_id）
     if access_payload:
         user_id = access_payload.get("sub")
         if user_id:
-            await clear_session(redis,user_id)
+            try:
+                await fuse_fail_closed(fuse,clear_session,redis,user_id,action="撤销会话登记")
+            except (RedisError, CircuitOpenError):
+                logger.error("登出链路：Redis 挂了——无法撤销会话登记，向客户端返回 503")
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="服务暂不可用,请稍后再试")
+
 
     #返回结果
     return {"success":True}
@@ -133,7 +156,7 @@ async def password_reset(inform:PasswordReset,session:AsyncSession)->bool:
     return result
 
 #定义通过刷新令牌获取新同行令牌函数
-async def user_refresh(refresh_token:str,redis: aioredis.Redis):
+async def user_refresh(refresh_token:str,redis: aioredis.Redis,fuse:RedisFuse):
     #1解码
     payload = decode_token(refresh_token)
     #2鉴别token类型
@@ -158,19 +181,31 @@ async def user_refresh(refresh_token:str,redis: aioredis.Redis):
     if not session_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="无效会话id！")
     #判断当前刷新令牌是否在黑名单中
-    if await is_blocklisted(redis,jti):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="令牌位于黑名单中！")
+    try:
+        if await fuse_fail_closed(fuse,is_blocklisted,redis,jti,action="判断刷新令牌是否位于黑名单中"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="令牌位于黑名单中！")
+    except (RedisError, CircuitOpenError):
+        logger.error("刷新令牌路链：Redis 挂了——无法判断当前刷新令牌是否位于黑名单中，向客户端返回 503")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="服务暂不可用,请稍后再试")
 
     #判断会话id是否为当前会话id
-    if not await is_current_session(redis,session_id,user_id):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="会话id与当前会话id不符")
+    try:
+        if not await fuse_fail_closed(fuse,is_current_session,redis,session_id,user_id,action="是否为当前会话id") :
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="会话id与当前会话id不符")
+    except (RedisError, CircuitOpenError):
+        logger.error("刷新令牌路链：Redis 挂了——无法判断令牌中的会话id是否为当前会话id，向客户端返回 503")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="服务暂不可用,请稍后再试")
     #不在黑名单发令牌和session是当前的
     access_token = create_access_token(uuid.UUID(user_id),user_name,uuid.UUID(session_id))
     refresh_token = create_refresh_token(uuid.UUID(user_id),user_name,uuid.UUID(session_id))
 
     #把旧的访问令牌uuid加入redis黑名单
     ttl = max(int(payload.get("exp",0)) - int(time.time()),0)
-    await jwt_block_list(redis,jti,ttl)
+    try:
+        await fuse_fail_closed(fuse,jwt_block_list,redis,jti,ttl,action="把旧的访问令牌拉黑")
+    except (RedisError, CircuitOpenError):
+        logger.error("刷新令牌路链：Redis 挂了——无法拉黑旧令牌对，向客户端返回 503")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="服务暂不可用,请稍后再试")
     return {
         "access_token":access_token,
         "refresh_token":refresh_token,

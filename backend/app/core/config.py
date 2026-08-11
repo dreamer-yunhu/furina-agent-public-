@@ -24,7 +24,7 @@ class Settings:
     def __init__(self):
         self.pg_url = os.getenv("PG_URL")
         self.redis_url = os.getenv("REDIS_URL")
-        self.jwt_key = os.getenv("JWT_SECRET_KET")
+        self.jwt_key = os.getenv("JWT_SECRET_KEY")
         self.jwt_algo = os.getenv("JWT_ALGO")
         self.access_token_expire_seconds= 3600
         self.refresh_token_expire_days = 30
