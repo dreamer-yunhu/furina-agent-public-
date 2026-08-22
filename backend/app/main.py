@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.core.lifespan import app_lifespan
 from app.routers import auth, user, chat, knowledge, asset, ws
 import logging
@@ -7,6 +8,15 @@ import logging
 
 #定义FastAPI实例
 app = FastAPI(title = "芙宁娜agent",lifespan=app_lifespan)
+
+# 大黑塔手笔: 演示用前端是直接打开 html 文件（file://），必须开 CORS 才能跨域调 API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],       # 演示环境全放开；生产环境务必收紧成具体域名
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 #挂载各业务领域子路由
 app.include_router(auth.router)      # 认证
 app.include_router(user.router)      # 用户
