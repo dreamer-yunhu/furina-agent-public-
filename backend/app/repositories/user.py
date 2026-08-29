@@ -4,8 +4,8 @@
 """
 import logging
 import uuid
-
-from sqlalchemy import select
+from sqlalchemy import select,update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import hash_password
 from app.models.table import User
@@ -14,7 +14,7 @@ from app.schemas.model import UserCreate, PasswordReset
 logger = logging.getLogger(__name__)
 
 
-async def get_user_by_name(session: AsyncSession, username: str) -> User:
+async def get_user_by_name(session: AsyncSession, username:str) -> User:
     query = await session.execute(select(User).where(User.user_name == username))
     user = query.scalar_one_or_none()
     logger.debug("用户信息查询功能正常（名称查询）")
@@ -26,6 +26,11 @@ async def get_user_by_id(session: AsyncSession, user_id: uuid.UUID) -> User:
     user = query.scalar_one_or_none()
     logger.debug("用户信息查询功能正常（id查询）")
     return user
+
+async def get_other_user_by_name(session: AsyncSession,username:str,exclude_user_id:uuid.UUID) -> User|None:
+    query = await session.execute(select(User).where(User.user_name == username,User.id != exclude_user_id))
+    other_user = query.scalar_one_or_none()
+    return other_user
 
 
 async def user_create(session: AsyncSession, inform: UserCreate) -> User:
@@ -48,6 +53,20 @@ async def user_create(session: AsyncSession, inform: UserCreate) -> User:
         await session.rollback()
         raise
 
+async def user_reset(session: AsyncSession,user_id,update_dict:dict) ->User:
+    stmt = update(User).where(User.id == user_id).values(**update_dict)#**是python的字典解包符号，会把字典拆解为变量名=值的形式
+    try:
+        await session.execute(stmt) #执行
+        await session.commit()
+        return await get_user_by_id(session,user_id)
+    except IntegrityError:
+        await session.rollback()
+        raise
+
+    except Exception as e:
+        logger.exception("更新用户信息异常", exc_info=e)
+        await session.rollback()
+        raise
 
 async def reset_pwd(session: AsyncSession, inform: PasswordReset) -> bool:
     query = await session.execute(select(User).where(User.user_name == inform.username))

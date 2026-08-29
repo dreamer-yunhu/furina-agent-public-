@@ -28,6 +28,11 @@ class UserCreate(BaseModel):
     password : str = Field(min_length=8,max_length=128)
     hobby : str|None = Field(default=None,max_length=255)
 
+#定义更新用户信息需要提供的数据模型
+class UserUpdate(BaseModel):
+    user_name : str = Field(default=None,max_length=255,min_length=1,alias="username",pattern=r"\S+")
+    personal_preference : str|None = Field(default=None,min_length=1,max_length=128,alias="hobby",pattern=r"\S+")
+
 #定义用户登录信息模型
 class UserLogin(BaseModel):
     username : str = Field(max_length=255)

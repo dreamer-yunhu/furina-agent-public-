@@ -47,7 +47,7 @@ def create_jwt(payload: dict, expires_delta: timedelta, token_type: str,session_
         "jti": str(uuid.uuid4()),  #全局唯一id
         "iat": now,  #签发时间
         "exp": now + expires_delta,  #过期时间
-        "session_id":str(session_id)
+        "session_id":str(session_id) #全局会话唯一标识，只允许一个账户同一时间登录
     })
     #返还令牌模板
     return jwt.encode(to_encode, settings.jwt_key, algorithm=settings.jwt_algo)

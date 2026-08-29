@@ -1,5 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI,Request,status
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+
 from app.core.lifespan import app_lifespan
 from app.routers import auth, user, chat, knowledge, asset, ws
 import logging
@@ -26,11 +28,17 @@ app.include_router(asset.router)     # 资源（预留）
 app.include_router(ws.router)        # WebSocket（预留）
 
 
+logger = logging.getLogger(__name__) #兜底各种突发异常的日志
 
 #定义测试接口
 @app.get("/")
 async def root():
     return {"Hello":"World"}
+@app.exception_handler(Exception)
+async def exception_handler(request: Request, exc: Exception):
+    logger.error("未处理异常", exc_info=exc)   # traceback 记全
+    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,content={"detail": "服务器开小差了"})
+
 
 #配置日志
 logging.basicConfig(

@@ -4,13 +4,14 @@ import uuid
 from fastapi import HTTPException,status, Form
 from redis import asyncio as aioredis
 from redis.exceptions import RedisError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.fuse_helpers import fuse_fail_closed
 from app.models.table import User
 from app.repositories.redis_user import jwt_block_list, is_blocklisted, register_session, \
     is_current_session, clear_session
-from app.repositories.user import get_user_by_name, user_create, reset_pwd
-from app.schemas.model import UserCreate, UserLogin, UserOut, LoginResponse, PasswordReset
+from app.repositories.user import get_user_by_name, user_create, reset_pwd, user_reset, get_other_user_by_name
+from app.schemas.model import UserCreate, UserLogin, UserOut, LoginResponse, PasswordReset, UserUpdate
 from app.core.security import verify_password, create_access_token, create_refresh_token,decode_token
 from app.core.redis_fuse import RedisFuse, CircuitOpenError
 
@@ -210,6 +211,32 @@ async def user_refresh(refresh_token:str,redis: aioredis.Redis,fuse:RedisFuse):
         "access_token":access_token,
         "refresh_token":refresh_token,
     }
+
+async def user_update(user:User,session:AsyncSession,inform:UserUpdate)->dict:
+    """
+    用于更新用户非密码信息
+    :param inform: 用户提供的信息字段
+    :param user: 当前用户
+    :param session: 数据库会话对象
+    :return: 修改后的结果
+    """
+    #第一步，利用pydantic的特性，把需要修改的字段填充进入修改字典
+    update_dict = inform.model_dump(exclude_unset=True)
+    if not update_dict:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,detail="No fields to update")
+    #校验修改的名称是否同名
+    if update_dict.get("user_name",False):
+        if await get_other_user_by_name(session,inform.user_name,user.id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,detail="User already exists")
+    #开始执行更新操作——同时处理竞态窗口问题
+    try:
+        updated_user = await user_reset(session,user.id,update_dict)
+        result = {"username":updated_user.user_name,"hobby":updated_user.personal_preference}
+        return result
+    except IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,detail="User already exists")
+
+
 
 
 

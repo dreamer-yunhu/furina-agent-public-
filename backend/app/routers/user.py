@@ -2,8 +2,12 @@
 用户资料路由：当前用户信息等
 """
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio.session import AsyncSession
 from app.auth.dependencies import get_current_user
+from app.core.database import get_session
 from app.models.table import User
+from app.schemas.model import UserUpdate
+from app.services.user import user_update
 
 router = APIRouter(prefix="/users", tags=["用户"])
 
@@ -15,7 +19,19 @@ async def read_current_user(
     """获取当前登录用户的信息"""
     return {
         "id": str(current_user.id),
-        "user_name": current_user.user_name,
-        "personal_preference": current_user.personal_preference,
+        "username": current_user.user_name,
+        "hobby": current_user.personal_preference,
         "created_at": current_user.created_at,
     }
+
+@router.patch("/me")
+async def current_user_update(
+    inform:UserUpdate,
+    current_user: User = Depends(get_current_user),
+        session:AsyncSession = Depends(get_session),
+):
+    """
+    更新用户的非密码信息
+    """
+    result = await user_update(current_user,session,inform)
+    return result
