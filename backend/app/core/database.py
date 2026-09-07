@@ -53,7 +53,7 @@ async def close_db(app:FastAPI):
 async def get_session(request:Request)->AsyncSession:
     """
     依赖注入：每次请求获取一个数据库会话。
-    :param request:
+    :param request:请求
     :return:
     """
     async_session : async_sessionmaker = request.app.state.async_session

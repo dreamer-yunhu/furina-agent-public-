@@ -2,6 +2,8 @@
 会话业务层：组合 repository，做归属校验等业务判断。
 外键 user_id 的来源就在这里——从 current_user.id 取值传给 repository。
 """
+import asyncio
+asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,7 +63,9 @@ async def delete_user_conversation(
     await delete_conversation(session, conversation_id)
 
 #定义重命名用户会话名称
-async def rename_user_conversation(session:AsyncSession,*,current_user:User,conversation_id:str,title:str):
+async def rename_user_conversation(session:AsyncSession,*,
+                                   current_user:User,conversation_id:uuid.UUID,
+                                   title:str)->bool:
     #校验归属
     await get_owned_conversation(
         session,

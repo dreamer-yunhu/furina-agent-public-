@@ -62,3 +62,24 @@ class Message(SQLModel, table=True):
         index = True
     )
     conversation :Conversation = Relationship(back_populates="messages")
+
+#创建存储agent的thread_id的表
+class AgentThreadID(SQLModel, table=True):
+    id : uuid.UUID = Field(default_factory=uuid.uuid4,primary_key=True)
+    created_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),
+    )
+    updated_at: datetime = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),
+    )
+    title: str = Field(max_length=255)
+    user_id: uuid.UUID = Field(
+        foreign_key="user.id",
+        nullable=False,
+        ondelete="CASCADE",
+        index=True
+    )
+
+

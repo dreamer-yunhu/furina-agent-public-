@@ -1,9 +1,9 @@
 from fastapi import FastAPI,Request,status
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
-
+import asyncio
 from app.core.lifespan import app_lifespan
-from app.routers import auth, user, chat, knowledge, asset, ws
+from app.routers import auth, user, chat, knowledge, asset, ws, agent
 import logging
 
 
@@ -27,6 +27,7 @@ app.include_router(knowledge.router) # 知识库（预留）
 app.include_router(asset.router)     # 资源（预留）
 app.include_router(ws.router)        # WebSocket（预留）
 
+app.include_router(agent.router) #langgraph的agent
 
 logger = logging.getLogger(__name__) #兜底各种突发异常的日志
 

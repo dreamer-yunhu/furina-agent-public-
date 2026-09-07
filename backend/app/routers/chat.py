@@ -83,7 +83,7 @@ async def rename_conv(
         session,
         current_user = current_user,
         conversation_id = conversation_id,
-        title = new_title
+        title = new_title.title
     )
     return {"ok":True}
 

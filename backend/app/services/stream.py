@@ -5,8 +5,7 @@ import json
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis import asyncio as aioredis
-from redis.exceptions import RedisError
-from app.core.redis_fuse import CircuitOpenError
+
 from app.core.config import deepseek_client
 from app.core.redis_fuse import RedisFuse
 from app.core.fuse_helpers import fuse_fail_open

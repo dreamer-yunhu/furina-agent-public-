@@ -12,20 +12,26 @@ path = Path(__file__).parent.parent.parent.parent.resolve() /".env"
 load_dotenv(dotenv_path=path)
 API_KEY = os.getenv("DEEPSEEK_API_KEY")
 BASE_URL = "https://api.deepseek.com/v1"
+SEARCH_API_KEY =os.getenv("BOCHA_SEARCH_API_KEY")
 #配置客户端
 deepseek_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 #检测是否成功注入
 if not API_KEY:
     raise ValueError("API_KEY not set")
+if not SEARCH_API_KEY:
+    raise ValueError("SEARCH_API_KEY not set")
 
 #配置相关信息
 class Settings:
     def __init__(self):
+        self.base_url = BASE_URL
+        self.api_key = API_KEY
         self.pg_url = os.getenv("PG_URL")
         self.redis_url = os.getenv("REDIS_URL")
         self.jwt_key = os.getenv("JWT_SECRET_KEY")
         self.jwt_algo = os.getenv("JWT_ALGO")
+        self.search_api_key = os.getenv("BOCHA_SEARCH_API_KEY")
         self.access_token_expire_seconds= 3600
         self.refresh_token_expire_days = 30
 settings = Settings()

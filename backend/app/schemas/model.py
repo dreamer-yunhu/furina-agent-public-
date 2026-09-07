@@ -2,19 +2,24 @@
 用于定义数据模型
 """
 
-
+import uuid
 from pydantic import BaseModel,Field
 from enum import Enum
 
 
 
-#定义接收数据模型
+#定义openai SDK接收数据模型
 class ChatRequest(BaseModel):
     model : str = "deepseek-v4-flash"
     max_tokens : int = 1000
     user_input : str
     chat_session_id : str
 
+#定义agent接收数据模型
+class AgentRequest(BaseModel):
+    user_input:str = Field(max_length=255)
+    chat_thread_id : uuid.UUID
+    model:str = "deepseek-v4-flash"
 #定义枚举模型
 class MessageRole(str,Enum):
     USER = "user"
@@ -80,6 +85,10 @@ class LlmHistory(BaseModel):
 class RenameConversation(BaseModel):
     title : str = Field(max_length=255)
 
+#定义修改线程标题的数据模型
+class RenameThread(BaseModel):
+    title : str = Field(max_length=255)
+
 #定义通过刷新令牌获取新访问令牌的模型
 class RefreshTokenRequest(BaseModel):
     refresh_token : str
@@ -87,3 +96,7 @@ class RefreshTokenRequest(BaseModel):
 #定义登出接口获取刷新令牌模型
 class LogoutRequest(BaseModel):
     refresh_token : str
+
+#定义创建线程的模型
+class ThreadCreate(BaseModel):
+    title : str = Field(max_length=255)
