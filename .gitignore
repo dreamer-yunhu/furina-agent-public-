@@ -9,10 +9,13 @@ ven/
 *.pem
 # 向量数据库（运行时生成）
 chroma_db/
+# 角色知识语料（版权内容，不随仓库跟踪/发布；磁盘文件保留）
+backend/knowledge/
 # 临时文件与输出
 temp_images/
 output/
 logs/
+*.log
 # Python 编译缓存
 __pycache__/
 *.pyc
