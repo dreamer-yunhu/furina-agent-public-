@@ -60,7 +60,7 @@ async def list_threads(
         .order_by(AgentThreadID.created_at.desc()) #按照创建时间排序，倒序
         .offset((page - 1) * size) #跳过多少条数据
         .limit(size)) #查找多少条数据
-    return await session.execute(stm).scalars().all() #返还查找到的所有数据
+    return (await session.execute(stm)).scalars().all() #返还查找到的所有数据
 
 #统计线程数量
 async def count_threads(

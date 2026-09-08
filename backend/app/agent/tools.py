@@ -30,26 +30,7 @@ async def bocha_search_tool(query):
     )
     return response.json()
 
-#写调用ComfyUI的工具
-@tool
-async def comfyui_tool():
-    """
-    调用comfyui
-    :return:
-    """
-    pass
 
-#写调用代码助手的工具
-@tool
-async def coder_tool():
-    """
-    辅助编程工具
-    :return:
-    """
-    pass
-
-
-
-tools = [bocha_search_tool, comfyui_tool, coder_tool]
+tools = [bocha_search_tool]
 tool_node = ToolNode(tools=tools)
 

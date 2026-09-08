@@ -7,7 +7,6 @@ from pydantic import BaseModel
 
 class State(BaseModel):
     messages: Annotated[list,add_messages]
-    user_id:str
 
 
 

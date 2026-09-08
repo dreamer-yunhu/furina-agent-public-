@@ -33,11 +33,3 @@ def build_graph(saver: BaseCheckpointSaver):
 
     return graph_builder.compile(checkpointer=saver)
 
-# async def stream_graph_updates(user_input:ChatRequest):
-#     messages = {"messages": [{"role": "user", "content": user_input.user_input}]}
-#     async for event in graph.astream(messages,version="v2",stream_mode="messages"):
-#          if event["type"] == "messages":
-#             chunk,metadata = event["data"]
-#             print(chunk.content, end="")
-
-
