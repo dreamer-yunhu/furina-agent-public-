@@ -35,6 +35,10 @@ async def agent_chat(
         media_type="text/event-stream"
     )
 
+@router.get("/resume")
+async def resume_chat():
+    pass
+
 
 
 @router.post("/threads")

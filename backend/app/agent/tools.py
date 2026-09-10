@@ -1,5 +1,5 @@
 """
-放置agent的各种工具
+放置agent的公共工具
 """
 import httpx
 from langgraph.prebuilt import ToolNode
