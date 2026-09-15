@@ -4,7 +4,8 @@
 
 import uuid
 from pydantic import BaseModel,Field
-from enum import Enum
+from enum import Enum,StrEnum
+from typing import Literal
 
 
 
@@ -100,3 +101,34 @@ class LogoutRequest(BaseModel):
 #定义创建线程的模型
 class ThreadCreate(BaseModel):
     title : str = Field(max_length=255)
+
+#规定审核字段
+class ReviewAction(StrEnum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+#规定审核载荷
+class WritePreview(BaseModel):
+    tool_call_id: str #工具调用id
+    path: str  # 沙箱相对，不给绝对路径
+    is_new_file: bool
+    old_hash: str | None   # 新建时为 None，乐观锁——保证文件是提出审核时的内容，如果用户在审核期间改了重审
+    added: int
+    removed: int
+    diff: str
+
+#定义interrupt()返回载荷
+class ReviewRequest(BaseModel): # interrupt() 抛出侧
+    type: Literal["review_request"] = "review_request"
+    action   : Literal["review_request"] = "review_request"
+    requests : list[WritePreview] #请求是列表，那么审批也得是逐个审批
+
+#定义Command()接收载荷
+class ItemDecision(BaseModel):
+    tool_call_id: str       # 关联回 WritePreview
+    action: ReviewAction
+    reason: str | None
+
+class ReviewDecision(BaseModel): # Command(resume=) 收回侧
+    type: Literal["review_decision"] = "review_decision"
+    decisions: list[ItemDecision] #实现逐个审批
