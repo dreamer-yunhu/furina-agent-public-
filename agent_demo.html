@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Furina Agent 流式测试台</title>
+<style>
+  :root { --line:#ddd; --bg:#f7f8fa; }
+  * { box-sizing:border-box; }
+  body { font-family: "Microsoft YaHei", system-ui, sans-serif; margin:0; background:var(--bg); color:#222; }
+  .wrap { max-width:960px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; margin-top:0; }
+  section { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:14px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  label { font-size:13px; color:#666; flex:0 0 auto; }
+  input[type=text], input[type=password] { padding:6px 8px; border:1px solid var(--line); border-radius:6px; flex:1; min-width:120px; }
+  button { padding:6px 14px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button.primary { background:#2f6fed; color:#fff; border-color:#2f6fed; }
+  button.danger  { color:#c0392b; }
+  .hint { font-size:12px; color:#999; }
+  .panel { background:#0e1116; color:#e6edf3; border-radius:8px; padding:12px; font-family:Consolas,monospace;
+           font-size:13px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; line-height:1.6; }
+  #chatLog { height:340px; }
+  #rawLog  { height:150px; color:#8b949e; font-size:12px; }
+  .msg { margin-bottom:10px; }
+  .role-u { color:#79c0ff; } .role-a { color:#7ee787; }
+  .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:12px; margin-left:6px; vertical-align:middle; }
+  .tag-think { background:#d2a8ff; color:#0e1116; }
+  .tag-done  { background:#6bc46d; color:#0e1116; }
+  .tag-err   { background:#ffa198; color:#0e1116; }
+  .status { font-size:13px; color:#2f6fed; min-height:18px; }
+  .token-box { font-size:12px; color:#4d7c0f; word-break:break-all; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Furina Agent 流式接口测试台</h1>
+  <p class="hint">双击直接打开本文件（file://）即可。后端在宿舍时，Base URL 填开发机地址，如 http://192.168.3.49:8000。已登录后会要求先 POST /agent/threads 建线程拿到 thread_id，再 POST /agent 发消息收 SSE 流。</p>
+
+  <section>
+    <div class="row"><label>Base URL</label><input type="text" id="baseUrl" value="http://127.0.0.1:8000"></div>
+    <div class="row">
+      <label>用户名</label><input type="text" id="username" value="test">
+      <label>密码</label><input type="password" id="password" value="test1234">
+      <button id="btnLogin" class="primary">登录</button>
+      <button id="btnRegister">注册</button>
+    </div>
+    <div id="authStatus" class="status"></div>
+    <div id="tokenBox" class="token-box"></div>
+  </section>
+
+  <section>
+    <div class="row">
+      <label>thread_id</label>
+      <input type="text" id="threadId" placeholder="留空 → 点“新建线程”自动填">
+      <button id="btnNewThread" class="primary">新建线程</button>
+      <button id="btnListThreads">列出我的线程</button>
+    </div>
+    <div id="threadList" class="hint"></div>
+  </section>
+
+  <section>
+    <div class="row">
+      <input type="text" id="userInput" style="flex:3" placeholder="发给 agent 的话，回车发送">
+      <button id="btnSend" class="primary">发送</button>
+      <button id="btnStop" class="danger hidden">停止</button>
+      <button id="btnClear">清屏</button>
+    </div>
+    <div id="chatLog" class="panel"></div>
+  </section>
+
+  <section>
+    <div class="row"><label>原始 SSE 帧（排障）</label></div>
+    <div id="rawLog" class="panel"></div>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = null, controller = null;
+
+function base() { return $('baseUrl').value.replace(/\/+$/, ''); }
+function authHeaders(json) {
+  const h = {};
+  if (token) h['Authorization'] = 'Bearer ' + token;
+  if (json) h['Content-Type'] = 'application/json';
+  return h;
+}
+function setStatus(t) { $('authStatus').textContent = t; }
+function rawAppend(s) { const d = $('rawLog'); d.appendChild(document.createTextNode(s + '\n')); d.scrollTop = 1e9; }
+async function checkResp(res) {
+  if (!res.ok) {
+    let detail = '';
+    try { detail = JSON.stringify(await res.json()); } catch (_) {}
+    throw new Error('HTTP ' + res.status + ' ' + detail);
+  }
+  return res;
+}
+
+// ---------- 鉴权 ----------
+async function doAuth(url, body, isForm) {
+  const headers = { 'Content-Type': isForm ? 'application/x-www-form-urlencoded' : 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await checkResp(await fetch(base() + url, {
+    method: 'POST',
+    headers,
+    body: isForm ? body : JSON.stringify(body),
+  }));
+  return res.json();
+}
+$('btnRegister').onclick = async () => {
+  try {
+    await doAuth('/auth/register', { username: $('username').value, password: $('password').value });
+    setStatus('注册成功，可登录');
+  } catch (e) { setStatus('注册失败: ' + e.message); }
+};
+$('btnLogin').onclick = async () => {
+  try {
+    const body = new URLSearchParams({ username: $('username').value, password: $('password').value });
+    const data = await doAuth('/auth/login', body, true);   // ← OAuth2 form 编码
+    token = data.access_token;
+    $('tokenBox').textContent = 'access_token: ' + token.slice(0, 40) + '…';
+    setStatus('登录成功 ✔');
+  } catch (e) { setStatus('登录失败: ' + e.message); }
+};
+
+// ---------- 线程 ----------
+async function newThread() {
+  const data = await doAuth('/agent/threads', { title: '测试 ' + new Date().toLocaleTimeString() });
+  $('threadId').value = data.id;
+  setStatus('新建线程: ' + data.id);
+  return data.id;
+}
+$('btnNewThread').onclick = () => newThread().catch(e => setStatus('新建失败: ' + e.message));
+$('btnListThreads').onclick = async () => {
+  try {
+    const res = await checkResp(await fetch(base() + '/agent/threads', { headers: authHeaders() }));
+    const data = await res.json();
+    const items = (data.items || []).map(i =>
+      `<button onclick="pickThread('${i.id}')" style="margin:2px">[${i.id.slice(0, 8)}] ${i.title}</button>`).join('');
+    $('threadList').innerHTML = '共 ' + data.total + ' 个：' + items;
+  } catch (e) { $('threadList').textContent = '列表失败: ' + e.message; }
+};
+function pickThread(id) { $('threadId').value = id; setStatus('已选线程 ' + id); }
+
+// ---------- SSE 帧解析 ----------
+function parseSSEFrame(frame) {
+  const dataLines = [];
+  for (const line of frame.split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith(':')) continue;              // 空行 / 注释
+    if (t.startsWith('data:')) dataLines.push(t.slice(5).trim());
+  }
+  if (!dataLines.length) return null;
+  const text = dataLines.join('\n');
+  try { return JSON.parse(text); } catch (_) { return { __raw: text }; }
+}
+
+// ---------- 对话：DOM 累积 ----------
+let curAi = null;      // 当前 AI 消息容器
+function addTag(cls, label) {
+  const s = document.createElement('span');
+  s.className = 'tag ' + cls; s.textContent = label;
+  if (curAi) curAi.appendChild(s);
+  else { const d = document.createElement('div'); d.className = 'msg'; d.appendChild(s); $('chatLog').appendChild(d); }
+  $('chatLog').scrollTop = 1e9;
+}
+function appendText(txt) {
+  if (!curAi) return;
+  curAi.appendChild(document.createTextNode(txt));
+  $('chatLog').scrollTop = 1e9;
+}
+function renderEvent(p) {
+  if (p.__raw) { addTag('tag-err', '非JSON: ' + p.__raw.slice(0, 60)); return; }
+  const st = p.status || p.type;
+  if (typeof p.reply === 'string' && p.reply) appendText(p.reply);
+  if (st === 'thinking')  addTag('tag-think', '思考/工具调用中…');
+  if (st === 'done')      addTag('tag-done', 'done');
+  if (st === 'error' || p.code) addTag('tag-err', JSON.stringify(p));
+}
+
+async function sendMessage() {
+  const msg = $('userInput').value.trim();
+  let tid = $('threadId').value.trim();
+  if (!msg) return;
+  if (!token) { setStatus('请先登录'); return; }
+  if (!tid) { setStatus('无 thread_id，先建线程…'); tid = await newThread(); }
+
+  $('userInput').value = '';
+  $('btnSend').classList.add('hidden'); $('btnStop').classList.remove('hidden');
+  controller = new AbortController();
+
+  // 用户行
+  const u = document.createElement('div'); u.className = 'msg';
+  const ul = document.createElement('span'); ul.className = 'role-u'; ul.textContent = '你: '; u.appendChild(ul);
+  u.appendChild(document.createTextNode(msg)); $('chatLog').appendChild(u);
+
+  // AI 行（容器）
+  const a = document.createElement('div'); a.className = 'msg';
+  const al = document.createElement('span'); al.className = 'role-a'; al.textContent = 'AI: '; a.appendChild(al);
+  $('chatLog').appendChild(a); curAi = a;
+
+  try {
+    const res = await checkResp(await fetch(base() + '/agent', {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({ chat_thread_id: tid, user_input: msg }),
+      signal: controller.signal,
+    }));
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const frames = buffer.split('\n\n');   // 关键：切完留余量
+      buffer = frames.pop();
+      for (const frame of frames) {
+        const p = parseSSEFrame(frame);
+        if (p != null) { rawAppend('→ ' + frame.replace(/\n/g, ' ⏎ ')); renderEvent(p); }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') addTag('tag-think', '已停止');
+    else addTag('tag-err', e.message);
+  } finally {
+    curAi = null;
+    $('btnSend').classList.remove('hidden'); $('btnStop').classList.add('hidden');
+    controller = null;
+  }
+}
+
+$('btnSend').onclick = () => sendMessage().catch(e => { curAi = null; setStatus('发送异常: ' + e.message); });
+$('btnStop').onclick = () => controller && controller.abort();
+$('userInput').onkeydown = e => { if (e.key === 'Enter') sendMessage(); };
+$('btnClear').onclick = () => { $('chatLog').innerHTML = ''; $('rawLog').innerHTML = ''; };
+</script>
+</body>
+</html>
