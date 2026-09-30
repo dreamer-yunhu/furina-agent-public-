@@ -107,6 +107,12 @@ class ReviewAction(StrEnum):
     APPROVE = "approve"
     REJECT = "reject"
 
+#规定工具分级字段
+class ToolRisk(StrEnum):
+    SAFE = "safe" #不送审
+    RISKY = "risky" #送审
+    UNKNOWN = "unknown" # 不送审，直接挡下（fail-closed）
+
 #规定审核载荷
 class WritePreview(BaseModel):
     tool_call_id: str #工具调用id
@@ -117,7 +123,7 @@ class WritePreview(BaseModel):
     removed: int
     diff: str
 
-#定义interrupt()返回载荷
+#定义interrupt()发送载荷
 class ReviewRequest(BaseModel): # interrupt() 抛出侧
     type: Literal["review_request"] = "review_request"
     action   : Literal["review_request"] = "review_request"
@@ -128,7 +134,7 @@ class ItemDecision(BaseModel):
     tool_call_id: str       # 关联回 WritePreview
     action: ReviewAction
     reason: str | None
-
+#前端发的是审核工具的集合
 class ReviewDecision(BaseModel): # Command(resume=) 收回侧
     type: Literal["review_decision"] = "review_decision"
     decisions: list[ItemDecision] #实现逐个审批

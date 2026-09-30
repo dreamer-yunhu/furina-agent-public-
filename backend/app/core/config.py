@@ -32,6 +32,7 @@ class Settings:
         self.jwt_key = os.getenv("JWT_SECRET_KEY")
         self.jwt_algo = os.getenv("JWT_ALGO")
         self.search_api_key = os.getenv("BOCHA_SEARCH_API_KEY")
+        self.sandbox_root =Path(os.getenv("SANDBOX_ROOT"))
         self.access_token_expire_seconds= 3600
         self.refresh_token_expire_days = 30
 settings = Settings()

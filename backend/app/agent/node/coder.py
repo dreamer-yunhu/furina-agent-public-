@@ -7,32 +7,32 @@
 
     注：tools 节点内部调用会改文件的工具时，工具自带 interrupt() → 图在此暂停
 """
+from langchain_core.messages import AIMessage
 from langgraph.types import Command,interrupt
 from langgraph.prebuilt import ToolNode
 from langchain.messages import HumanMessage,SystemMessage
 from langgraph.graph import StateGraph,START,END
 from langgraph.graph.state import CompiledStateGraph
+from app.agent.exception.error import InvalidToolError
 from app.agent.state import CoderState
-from app.agent.tools import bocha_search_tool
-from app.agent.node.coder_tools import ReadFileTool, WriteFileTool
+from app.agent.registry import registry
 from app.agent.llm import llm
-from app.schemas.model import ReviewDecision,ReviewRequest,WritePreview
+from app.schemas.model import  ReviewRequest, ReviewAction
 from app.core.config import settings
-read_file_tool = ReadFileTool()
-write_file_tool = WriteFileTool()
-coder_tools = [read_file_tool, write_file_tool,bocha_search_tool]
+from app.agent.agent_dependencies import build_write_review, build_tool_messages, classify_tool_calls, is_legal_args, \
+    handle_review_fn
 
+coder_tools = registry.coder_tool
 # 给模型绑定工具
 llm_with_tools = llm.bind_tools(coder_tools)
-#工具白名单
-white_list = [read_file_tool.name]
-
+SAFE_TOOLS   = registry.coder_safe_tools
+RISKY_TOOLS = registry.coder_risky_tools
 
 async def prepare_node(state: CoderState) -> dict:
     """
     把主管发来的任务转成子图的第一条消息
     :param state:子图的状态
-    :return:
+    :return:更新字典
     """
     tool_tasks = state.subagent_task
     return {"coder_messages":[HumanMessage(tool_tasks)]}
@@ -58,31 +58,89 @@ async def model_node(state: CoderState):
 #注意，工具节点默认从messages字段取消息，而我的名称是coder_messages，所以得显示声明
 tool_node = ToolNode(coder_tools,handle_tool_errors=True,messages_key="coder_messages")
 
-async def review_node(state: CoderState):
-    #取出最新的消息看看是否有工具调用需求
+#定义校验节点+预审批——放行全是安全工具的调用
+async def prevalidate_node(state: CoderState):
+    #取出最新的消息看看是否有工具调用
     latest = state.coder_messages[-1]
-    #筛选出高危工具
-    risky = [risky_tools
-             for risky_tools in latest.tool_calls
-             if risky_tools not in white_list
-             ]
-    tool_calls = []
-    for tool_detail in latest.tool_calls:
-        tool_payload = WritePreview(
-            tool_call_id=tool_detail.get("id",None),
-            path = tool_detail["args"]["file_path"],
-            is_new_file =True,
-            old_hash="str"
+    if not isinstance(latest,AIMessage) or not latest.tool_calls:
+        return Command(goto="model_node")
+    #原始工具调用
+    raw_tool_calls = latest.tool_calls
+    #分堆
+    try:
+        risky,unknown = await classify_tool_calls(
+            raw_tool_calls,
+            RISKY_TOOLS,
+            SAFE_TOOLS,
+            registry=registry.coder_tool_name_registry
 
         )
-        tool_calls.append(tool_payload)
+    except InvalidToolError as e:
+        pass
+    #粗颗粒都审核——全安全和没有未知工具放行
+    if not risky and not unknown:
+        return Command(goto="model_node")
+    # 如果有未知工具
+    if unknown:
+        return Command(
+            goto="model_node",
+            update={
+                "coder_messages": [
+                    await build_tool_messages(
+                        tc,
+                        content=f"存在位置工具{tc["name"]}！请严格按照注册工具工具表调用工具"
+                        if tc in unknown else "存在未知工具，暂停执行"
+                    )
+                    for tc in raw_tool_calls
+                ]
+            }
+        )
+    #出现安全工具和危险工具并存——构造载荷并且存入快照，交给后面的中断节点
+    risky_review = []  # 调用工具集合
+    # 装填载荷
+    for tool_detail in risky:
+        tool_payload = await build_write_review(
+            tool_call=tool_detail,
+            workspace_root=settings.sandbox_root,
+        )
+        risky_review.append(tool_payload)
     payload = ReviewRequest(
-        requests=tool_calls
+        requests=risky_review
     )
-    decision = interrupt(
-        payload.model_dump(mode="json")
+    #更新状态，跳转到中断节点
+    return Command(
+        goto="review_node",#前往中断节点
+        update={
+            "pending_reviews": payload
+        }
     )
-    #返回出参数
+
+
+
+async def review_node(state: CoderState)->Command:
+    #读取快照的载荷，送审！
+    snapshot = state.pending_reviews
+    if snapshot is None:
+        return Command(goto="model_node")
+    #送审
+    command_resume= interrupt(
+        snapshot.model_dump(mode="json")
+    )
+    return Command(
+        goto="execute_node",#中断回复执行后跳转行节点
+        update={
+            "decision_review":command_resume #将人类审核结果存入状态
+        }
+    )
+
+
+#定义执行节点
+async def execute_node(state: CoderState)->Command:
+    snapshot = state.pending_reviews
+    decision = state.decision_reviews
+    #快照或者决定为空时
+    if snapshot is None or decision is None:
+        return Command(goto="model_node")
 
 
 
@@ -92,7 +150,7 @@ def should_continue(state:CoderState) -> str:
     """
     message = state.coder_messages[-1]
     if message.tool_calls:
-        return  "tools_node"
+        return  "review_node"
     else:
         return "END"
 
@@ -120,12 +178,11 @@ def build_coder(*,coder_prepare_node
     #添加预构建节点到llm调用的边
     builder.add_edge("prepare_node","model_node")
     #构建llm调用到review节点的边
-    builder.add_edge("model_node","review_node")
     #添加条件边
     builder.add_conditional_edges(
-        "review_node",
+        "model_node",
         coder_should_continue,
-        {"tools_node":"tools_node","END":END}
+        {"review_node":"review_node","END":END}
 
     )
     #添加工具节点到llm节点的边

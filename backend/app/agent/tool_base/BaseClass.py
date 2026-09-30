@@ -3,6 +3,7 @@
 """
 from langchain_core.tools import BaseTool
 from pathlib import Path
+from app.core.config import settings
 
 
 class PathOutOfSandbox(Exception):
@@ -16,7 +17,7 @@ class BaseFileTool(BaseTool):
     """
     统一规范agent调用涉及风险操作的权限和边界
     """
-    root_dir: str = "C:/furina-agent/sandbox"
+    root_dir: str = settings.sandbox_root
     def _resolve(self,path:str)->Path:
         root = Path(self.root_dir).resolve() #获取绝对路径
         target = (root/Path(path)).resolve()

@@ -31,6 +31,3 @@ async def bocha_search_tool(query):
     return response.json()
 
 
-tools = [bocha_search_tool]
-tool_node = ToolNode(tools=tools)
-
