@@ -848,3 +848,178 @@ LangGraph 里节点抛异常 = **整个 `ainvoke` 失败**（除非配 `retry_po
 > - resume 是**节点级重跑** → `interrupt()` **之前**的代码必须幂等
 >   （`build_write_review` 只读 ✅；`_t_review.py` 里的 monkeypatch 只影响测试）
 > - **每一个** `tool_call` 必须恰好配一条 `ToolMessage`，漏一个 → 下一轮 400（离现场很远）
+
+---
+---
+
+# 【第五部分】拆共享内核 + uv workspace（本次重构会话）
+
+> 主题：修 import 链 → 搭 uv workspace → 写 `furina-core` → 环境踩坑
+> 状态：**core 已写完并 12 项断言实测通过**；`backend/` 的迁移**尚未开始**
+
+## 〇、进度快照
+
+| 模块 | 状态 | 说明 |
+|---|---|---|
+| `backend/` 的 3 处 import 级错误 | ✅ **已修并提交**（`bb8a3e3`） | 详见 §一 |
+| uv workspace 骨架 | ✅ **已完成** | `packages/core` + `apps/{web,desktop}`，4 成员入 lock |
+| `furina-core`（9 文件） | ✅ **已完成，12 项断言通过** | 详见 §三 |
+| `scripts/verify_core.py` | ✅ | 可运行的验证脚手架 |
+| `backend/` → `apps/*` 的源码迁移 | ❌ **未开始** | 等环境与决策 |
+| 前端 | ❌ 零 | `frontend/` 只剩脚手架残留 |
+
+## 一、⭐ 本轮最值钱的三个知识点
+
+### 1. Pydantic v2 禁止"类级访问字段"
+
+```python
+class ReadFileTool(BaseFileTool):
+    name: str = "read_file_tool"
+
+ReadFileTool.name         # ❌ AttributeError: name（来自 ModelMetaclass.__getattr__）
+ReadFileTool().name       # ✅ 'read_file_tool'（实例上正常）
+ReadFileTool.model_fields["name"].default   # ✅ 确实要在类上取值时走这里
+```
+
+**病根**：和第二部分记的 `#6/#7`（`AIMessage.tool_calls` 必须实例访问）
+**是同一个病** —— **搞混了"类对象"和"实例对象"**。这是本项目的第 N 次复发。
+
+同一文件里还有它的**另一个变体**：
+
+```python
+tool.args.key()                                # ❌ dict 没有 .key()（那是 Java/Jackson 写法）
+{arg for tool in TOOLS for arg in tool.args}   # ✅ 迭代 dict 拿到的是"键"
+```
+
+**排查口诀**：报错说某个名字不对时，先问 **"它说的那个名字在哪一侧？"**
+—— 类 vs 实例？dict vs 对象？
+
+### 2. ⭐ asyncio 下的"无锁"：判据是"临界区里有没有 await"
+
+本轮最值得记的一条，因为它能解释两个**相反**的设计决定。
+
+**先破除误区**：无锁 ≠ 没有临界区。
+- 多线程里，打断来自**线程调度** → 需要 `threading.Lock`
+- asyncio 里，**打断只来自 `await`** → 一段**没有 await 的同步代码**本身就原子
+
+| | 令牌桶 `LocalTokenBucket` | 熔断器 `CircuitBreaker` |
+|---|---|---|
+| 临界区内有 await 吗 | ❌ 没有 | ✅ **必须有**（要先 await 下游调用） |
+| 所以要锁吗 | **不要** | **要** |
+| 加锁的后果 | 反而把临界区**切开**，制造竞态 | 保护"读-改-写" |
+
+**熔断器不加锁会怎样**（原版 `RedisFuse` 的真实缺陷）：
+
+```
+协程1: 读 _fail_count = 0   ...      ← 两个都读到 0
+协程2: 读 _fail_count = 0   ...
+协程1: _fail_count = 1
+协程2: _fail_count = 1               ← 两次失败只记了 1 次
+```
+
+配置"连续失败 5 次跳闸"，实际要失败 8 次才跳。
+**这个 bug 只会让熔断变慢，不报错** —— 最难发现的那一类。
+实测证据：`10 concurrent failures -> tripped`（去掉锁就会 FAIL）。
+
+**加锁的正确姿势**：锁要包住**读-改-写整段**，不是只包写。
+
+```python
+async with lock: 读状态; 判断; 改状态     # ✅
+读状态; async with lock: 改状态           # ❌ 读和写之间仍可被插入
+```
+
+### 3. ⭐ 路径安全必须"两道门"，且第二道才是真门
+
+```python
+if Path(p).is_absolute(): raise ...        # 第一道门：意图检查
+target = (root / p).resolve()              # 拼接 + 解析
+if not target.is_relative_to(root): raise  # 第二道门：结果校验 ★
+```
+
+**第一道门挡不全，有具体漏网输入**（实测）：
+
+```
+PureWindowsPath('/etc/passwd').is_absolute()  =  False   ← 放行了！
+而 (root / '/etc/passwd')  =  C:\etc\passwd              ← root 被替换掉了
+```
+
+Windows 的"绝对路径"需要盘符，只有根斜杠不算 → 第一道门放行；
+而 `pathlib` 的规则是"右侧绝对路径会替换左侧" → 跑出沙箱。
+
+**第二道门接住了它**（实测 `[BLOCKED] root-relative -> PathOutOfSandbox`），因为：
+- `.resolve()` 会**展开符号链接**：沙箱里放 `link -> /etc/passwd`，解析后露真身
+- 比对的是**解析后的真实路径**，不是输入字符串
+
+**另外两个必记点**：
+- `root` 自己也要 `.resolve()`，否则比对基准是假的，整道防线失效
+- **不要用 `startswith`**：`"/sandbox-evil".startswith("/sandbox")` 为真 → 错误放行
+
+## 二、uv workspace：为什么它能同时满足"依赖分开"和"只维护一份环境"
+
+**核心价值**：每个成员**各有自己的 `pyproject.toml` + 自己的 dependencies**，
+但**共享一个 `.venv` 和一个 `uv.lock`**。
+
+```
+packages/core/pyproject.toml    furina-core     pyjwt / bcrypt / python-dotenv
+apps/web/pyproject.toml         furina-web      + email-validator
+apps/desktop/pyproject.toml     furina-desktop  + langgraph / langchain / psycopg / httpx
+```
+
+**实测证据**（`uv tree --package`）：`langgraph` 只出现在 desktop 下、
+`email-validator` 只出现在 web 下 —— **分离成立**。
+
+**四个要记住的要点**：
+
+| 要点 | 说明 |
+|---|---|
+| 根 `pyproject.toml` 变成"纯声明" | 自身几乎无依赖（只留 `uvicorn`）。**业务依赖全部下移到成员** |
+| **`--all-packages` 必须加** | 不加只装根工程依赖 → 现象就是"67 个包被卸掉却没装回来" |
+| `[tool.uv.sources]` 那行必须写 | `furina-core = { workspace = true }`。uv 0.12.5 **不会**自动推断成员依赖 |
+| 包名 ≠ import 名 | `furina-core`（PyPI 规范用横线）→ `import furina_core`（标识符用下划线） |
+
+**为什么必须用 `src/` 布局**：只有真正安装进环境的包才 import 得到 ——
+**这正是"验证依赖分离是否成立"的前提**。
+
+## 三、本轮新增/重写的代码
+
+| 文件 | 说明 |
+|---|---|
+| `furina_core/config.py` | `CommonSettings` / `WebSettings`；**改掉 import 期 `raise`**，换成 `require_*()` 显式校验 |
+| `furina_core/security.py` | bcrypt + JWT；**`TokenError` 取代 `HTTPException`**（core 不 import fastapi）；`session_id` 改可选 |
+| `furina_core/circuit_breaker.py` | 原 `RedisFuse` → 去 Redis 依赖 + **加锁修竞态** + `reset()` |
+| `furina_core/circuit_policies.py` | 原 `fuse_helpers` → 去 Redis / FastAPI 依赖 |
+| `furina_core/sandbox.py` | 原 `BaseFileTool._resolve` → 独立成 `PathJail`；**修掉 `and`→`or` 的空值漏洞** |
+| `furina_core/limits/local_bucket.py` | **补上空壳**（原 `redis_limiter.py` 只有 `__init__`）：进程内无锁令牌桶 |
+
+## 四、环境踩坑（uv workspace 特有，别重复踩）
+
+| # | 现象 | 根因 | 解决 |
+|---|---|---|---|
+| 1 | `uv` 全部命令报 `Failed to initialize cache` | 缓存目录在用户目录，写不进去 | `$env:UV_CACHE_DIR` 指到项目内 |
+| 2 | `uv sync` 卸了 67 个包却没装回来 | **根变成工作区根后只剩 `uvicorn`**，默认只装根工程的 | `--all-packages` |
+| 3 | `error: failed to write to file uv.lock: 拒绝访问` | uv 每次都想**改写** lock | `--frozen` |
+| 4 | 删不掉旧 `.venv` 里的 `uvicorn.exe` | 目录权限 | 换新环境目录 + `UV_PROJECT_ENVIRONMENT` |
+| 5 | `Expected a Python module at: src/xxx/__init__.py` | `uv_build` 要求 `src/<包名>/__init__.py` 存在 | 补 `__init__.py` |
+
+**一句话**：`uv sync --all-packages --frozen` + 两个环境变量。完整文档见 [DEV.md](DEV.md)。
+
+## 五、被推翻 / 修正的旧结论（本轮）
+
+| 旧结论（出处） | 现状 |
+|---|---|
+| PLAN §六「AI 根本看不到 `user_name`/`personal_preference`」 | ❌ **不准**。字段早就就位，**真实状态是"没人往里写"** |
+| PLAN §二/§八「Rust 网关是第 1 期，理由是并发」 | ⚠️ **理由改了**：从"性能"改成**"与 Tauri 同栈"**。顺序改成**先压测拿数字再决定** |
+| PLAN §七「checkpointer 存 PG」 | ⚠️ **web 保留 PG；desktop 改 SQLite**（LangGraph 有官方 SQLite saver） |
+| 「限流熔断都要保留」→ 以为都要 Redis | ⚠️ **desktop 不需要 Redis**：熔断器状态本来就在内存；限流改用进程内令牌桶，**限出站 LLM 调用**（防成本失控），不是防本地滥用 |
+| PLAN §四.1 PATCH /users/me 四个 bug | ✅ **已修完**（静态核对通过，仍未运行验证） |
+| PLAN §四.2 `redis_limiter.py` 零引用 | ✅ **已解决**：那文件是空壳，已用 `LocalTokenBucket` **补上真实实现** |
+| PLAN §四.2 `models/ORM.py` 双套 ORM | ✅ **文件已不存在**（已删） |
+
+## 六、本轮**没做**的事（别以为做完了）
+
+- ❌ `backend/` → `apps/*` 的源码迁移**一行都没搬**
+- ❌ 主管图 5 个业务节点仍是 `raise NotImplementedError`
+- ❌ HITL 恢复链路没接（`GET /agent/resume` 是 `pass`，`handle_review_fn` 无调用者）
+- ❌ `agent_stream.py` 循环体首行仍是 `raise NotImplementedError` → `/agent` 必 500
+- ❌ 前端零；无 pytest 体系；无 Docker；无 CI
+- ❌ 熔断器只用假函数验了状态机，**没接真实下游**

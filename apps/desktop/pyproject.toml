@@ -1,0 +1,39 @@
+[project]
+name = "furina-desktop"
+version = "0.1.0"
+description = "桌面版：agent 引擎（LangGraph 主管图 + coder 子图 + HITL 审批）"
+requires-python = ">=3.12"
+dependencies = [
+    # 共享内核
+    "furina-core",
+    # desktop 独有：agent 编排与工具链
+    "langgraph>=1.2.11",
+    "langchain>=1.3.18",
+    "langchain-core>=1.6.1",
+    "langchain-openai>=1.6.0",
+    "langchain-protocol>=0.0.19",
+    "httpx>=0.28.1",
+    # ── 存储：SQLite（agent 状态）+ LanceDB（向量，RAG 用）──
+    # ★ checkpointer 从 PG 换成 SQLite —— 桌面端零外部服务
+    "langgraph-checkpoint-sqlite>=3.0.0",
+    # LanceDB 现在加、M2 才用。理由见 docs/DESKTOP-PLAN.md §5.1：
+    # 它带原生二进制（pyarrow + 向量库），是安装包体积的主要变量之一，
+    # 必须让它参与 M0 的打包验证 —— 否则打包实验的结论是假的。
+    "lancedb>=0.38.0",
+]
+# 已移除（桌面端不再需要，只在 web 侧保留）：
+#   langgraph-checkpoint-postgres / psycopg[binary] / psycopg-pool
+
+# 注意：这里故意不出现 email-validator —— 那是 web 的表单校验专属。
+
+[tool.uv.sources]
+furina-core = { workspace = true }
+
+# CLI 入口：装好之后可以直接敲 `furina-desktop` 启动
+[project.scripts]
+furina-desktop = "furina_desktop.main:run"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+

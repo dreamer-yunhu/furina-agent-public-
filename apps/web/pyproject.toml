@@ -1,0 +1,33 @@
+[project]
+name = "furina-web"
+version = "0.1.0"
+description = "Web 版：部署到域名。多用户认证 + 角色扮演/闲聊对话（含 RAG）"
+requires-python = ">=3.12"
+dependencies = [
+    # 共享内核（工作区成员，uv 自动解析为本地路径）
+    "furina-core",
+    # ── web 的存储：PostgreSQL + Redis ──
+    # ⚠️ 2026 本次会话修正：这些原来靠 furina-core "顺带"带进来，
+    #    我把框架依赖从 core 收窄过一次，结果漏声明了 —— 表现为
+    #    `ModuleNotFoundError: No module named 'sqlmodel'`。
+    #    依赖必须**谁用谁声明**。
+    "asyncpg>=0.31.0",            # PG 异步驱动（SQLAlchemy 用）
+    "psycopg[binary]>=3.3.5",     # PG 同步驱动（web 侧若要用）
+    "redis[hiredis]>=8.0.1",      # 热缓存 / JWT 黑名单 / 会话登记
+    # ── web 独有的 Web 层细节 ──
+    "email-validator>=2.0.0",     # 表单登录校验
+    "python-multipart>=0.0.32",   # 表单（application/x-www-form-urlencoded）解析
+]
+# 注意：这里故意不出现 langgraph / langchain / psycopg-pool —— 那些是 desktop 专属。
+# 迁移完成后，本工程 `import langgraph` 必须失败，这是依赖分离的客观验收标准。
+
+[tool.uv.sources]
+furina-core = { workspace = true }
+
+# CLI 入口：装好之后可以直接敲 `furina-web` 启动
+[project.scripts]
+furina-web = "furina_web.main:run"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

@@ -1,0 +1,37 @@
+[project]
+name = "furina-core"
+version = "0.1.0"
+description = "web 与 desktop 共享的内核：配置、契约枚举、表模型、认证原语、熔断器、路径沙箱、限流"
+requires-python = ">=3.12"
+dependencies = [
+    # ── 纯原语 ──
+    "pyjwt>=2.13.0",          # JWT 签发/校验
+    "bcrypt>=5.0.0",          # 口令哈希
+    "python-dotenv>=1.2.2",   # .env 加载
+    "pydantic>=2.13.4",       # 契约模型（enums/contracts 用）
+    # ── Web 框架与 ORM ──
+    # ⚠️ 2026 本次会话修正：最初我写的红线是"core 零框架依赖"，
+    #    但搬运后 core 里确实有两个文件必须用它们，红线名存实亡：
+    #      · furina_core/models.py          → SQLModel 表定义（含共享列类型 Text）
+    #      · furina_core/storage/session.py → FastAPI 的 Depends + AsyncSession 类型
+    #    这两样**两边都用**，所以依赖必须声明在这里。
+    #    真正的红线应该改成下面那条（见文件末尾）。
+    "fastapi>=0.139.0",
+    "sqlmodel>=0.0.39",
+    "sqlalchemy>=2.0.51",
+    "openai>=1.0.0",          # config.make_async_client 用（两边都调 LLM）
+]
+# 真正的依赖红线（可机械检查）：
+#   core **不 import 任何具体存储后端** —— 没有 asyncpg / psycopg / redis。
+#   理由：web 用 PG+Redis，desktop 用 SQLite+LanceDB。
+#   一旦 core 里出现这些，desktop 就会白背一个它不用的数据库驱动
+#   （这正是重构要消除的东西）。
+#
+# 留在各自 app 的：
+#   asyncpg / psycopg / psycopg-pool / redis[hiredis]  -> web 的存储与会话
+#   langgraph / langchain / langchain-openai           -> desktop 的 agent 编排
+#   lancedb                                            -> desktop 的向量检索
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

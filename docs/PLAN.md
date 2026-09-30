@@ -6,6 +6,46 @@
 
 ---
 
+## ⚠️ 读前必看：本文档的状态（2026 本次重构会话更新）
+
+> **按 AGENTS.md §一点五：本文是"意图"，不是"事实"。** 多处已被后续决策推翻，
+> 下方逐条标注了状态。**开工前请以代码实测为准，不要以本文为准。**
+
+### 已被推翻的决策（不要照做）
+
+| 章节 | 原文写的 | 现状 |
+|---|---|---|
+| §二 / §八 | Rust 网关作为**第 1 期**，理由是"并发有要求" | ⚠️ **降级**。理由从"性能"改为**"与 Tauri 同栈"**（桌面壳本身是 Rust，网关同栈可共用 crate 与进程模型）。顺序改成**先压测拿数字，再决定要不要写**——并发能力可以用数字证明，用不着先造一个网关 |
+| §三 决策 1 | 桌面 = 客户端壳，**共用同一后端** | ✅ 保留。但存储分开了：web 用 PG+Redis，**desktop 用 SQLite + LanceDB**（零外部服务，"双击即用"） |
+| §二 / §八 阶段 2 | Rust RAG 服务 | ⚠️ **暂缓**。RAG 先做成 Python 模块（`lancedb` 已在依赖里但零引用），等真有性能数据再决定下沉 |
+| §七 | checkpointer 存 PG | ⚠️ **web 保留 PG；desktop 改 SQLite**（LangGraph 有官方 SQLite saver，不是手写） |
+| §六 | "AI 根本看不到 `user_name`/`personal_preference`" | ✅ **已部分解决**：`UserOut` 已回传 `personal_preference`，`SupervisorState` 已声明两个字段。**真实状态是"字段就位、没人往里写"**，不是"没设计" |
+| §四 4.1 | PATCH /users/me 四个 bug | ✅ **已修完**（见 §四 标注） |
+
+### 本轮新增的架构决定
+
+1. **重构为 uv workspace**：`packages/core`（共享内核）+ `apps/web` + `apps/desktop`，
+   依赖分开管理，共享代码做成可安装包 `furina-core`。详见 [DEV.md](DEV.md)。
+2. **core 的定位是"零存储、零框架、零 LLM SDK"**：不 import redis / psycopg / fastapi / langgraph，
+   只留认证原语、熔断器、路径沙箱、限流协议。依赖只有 `pyjwt` / `bcrypt` / `python-dotenv`。
+3. **桌面端不接 Redis**：限流改成进程内无锁令牌桶（`furina_core.limits.LocalTokenBucket`），
+   **限的是出站 LLM 调用**（防成本失控 + 撞供应商限速），不是防本地滥用。
+   熔断器（`furina_core.circuit_breaker.CircuitBreaker`）保留但去掉 Redis 依赖。
+4. **双模式 = 同一个 supervisor 的两个能力清单**，不是一个模式一套代码。
+   `mode` 决定"谁可以被调用"，`route_edge` 只决定"这一步要不要检索"——两者不是一回事。
+
+### 仍未解决（真正的阻塞）
+
+| 阻塞 | 位置 |
+|---|---|
+| 主管图 5 个业务节点全是 `raise NotImplementedError` | `backend/app/agent/graph.py:32-90` |
+| HITL 恢复链路没接（`GET /agent/resume` 是 `pass`，`handle_review_fn` 无调用者） | `routers/agent.py:38`、`agent_dependencies.py:192` |
+| SSE 桥未实现（`agent_stream.py` 循环体首行 `raise NotImplementedError`） | `services/agent_stream.py:37` |
+| 前端为零（`frontend/` 只剩脚手架残留 + 4.25 GB 构建产物） | —— |
+| 无测试 / 无 Docker / 无 CI | —— |
+
+---
+
 ## 一、项目定位与目标
 
 - **性质**：求职作品（工程能力展示）+ GitHub 开源 + 自用
@@ -84,32 +124,37 @@ PostgreSQL (消息/会话)  +  Redis (热缓存/会话/限流计数)
 
 ## 四、当前代码缺陷清单（治理顺序）
 
-### 4.1 修改用户信息接口（PATCH /users/me）——必崩，优先修
+### ~~4.1 修改用户信息接口（PATCH /users/me）——必崩，优先修~~ ✅ 已完成
 
-| 层 | 位置 | Bug |
-|---|---|---|
-| router | `routers/user.py:36` | `user_update(inform, session, current_user)` **缺 await**，且实参顺序与签名 `(user, session, inform)` 不符 |
-| service | `services/user.py:227` | `return user_reset(...)` **缺 await**，返回 coroutine 不是 bool |
-| repository | `repositories/user.py:55` | `session.refresh(stmt)` 传的是 `Update` **语句对象**，refresh 需 ORM 实例，必抛 `InvalidRequestError` |
-| 字段映射 | `services/user.py:223` | schema 字段 `username`/`hobby` ≠ 列 `user_name`/`personal_preference`，`.values(**dict)` 必报 `Entity has no property`；对照 `user_create` 的映射修 |
-| 校验 | `schemas/model.py:32-34` | `username: str\|None` 允许 null/空串；`user_name` 列未设 `nullable=False`，null 会把登录名清空 |
+> **状态：全部修完并静态核对通过**（见 `docs/NOTES.md` 第一部分记录的 7 个坑）。
+> 实测证据：`routers/user.py:36` 已有 `await` 且实参顺序为 `(current_user, session, inform)`；
+> `services/user.py:215-237` 的 `user_update` 已用 `model_dump(exclude_unset=True)` + 列名对齐 + `IntegrityError→409`。
+> ⚠️ **但仍未跑通验证**（需要真实 PG 环境）。
+
+| 层 | 位置 | Bug | 状态 |
+|---|---|---|---|
+| router | `routers/user.py:36` | `user_update(inform, session, current_user)` **缺 await**，且实参顺序与签名 `(user, session, inform)` 不符 | ✅ 已修 |
+| service | `services/user.py:227` | `return user_reset(...)` **缺 await**，返回 coroutine 不是 bool | ✅ 已修 |
+| repository | `repositories/user.py:55` | `session.refresh(stmt)` 传的是 `Update` **语句对象**，refresh 需 ORM 实例，必抛 `InvalidRequestError` | ✅ 已修（改 bulk update + 反查） |
+| 字段映射 | `services/user.py:223` | schema 字段 `username`/`hobby` ≠ 列 `user_name`/`personal_preference`，`.values(**dict)` 必报 `Entity has no property` | ✅ 已修 |
+| 校验 | `schemas/model.py:32-34` | `username: str\|None` 允许 null/空串；`user_name` 列未设 `nullable=False` | ✅ 已修（`min_length=1` + `pattern=r"\S+"`） |
 
 **决策**：软查重（`get_other_user_by_name`）**已砍**（单用户无意义，唯一约束兜底）。改 Pydantic 收紧 + 可选 `IntegrityError` 捕获。
 
 ### 4.2 死代码
 
-| 文件 | 问题 | 处置 |
-|---|---|---|
-| `core/redis_limiter.py` | 令牌桶限流器**全项目零引用** | 要么删，要么**挂到入口路由真正生效**（否则求职负分） |
-| `models/ORM.py` | 第二套 ORM 模型（`ChatMessage`），与 `table.py` 并存，零引用 | **删除**，统一用 SQLModel |
+| 文件 | 问题 | 处置 | 状态 |
+|---|---|---|---|
+| `core/redis_limiter.py` | 令牌桶限流器**全项目零引用** | 要么删，要么**挂到入口路由真正生效** | ✅ **已解决（换了个做法）**：该文件只有 `__init__` 没有 `acquire`，是**空壳**。已用 `furina_core.limits.LocalTokenBucket` **补上真实实现**（进程内无锁，12 项断言实测通过）。分布式版本留给 Rust 网关 |
+| `models/ORM.py` | 第二套 ORM 模型（`ChatMessage`），与 `table.py` 并存，零引用 | **删除**，统一用 SQLModel | ✅ 已删（文件已不存在） |
 
 ### 4.3 其他质量项
 
-- 三个"预留"空壳路由 `knowledge/asset/ws`：**决定去留**——要么做成真的（knowledge 会被 Rust RAG 取代），要么从简历/文档里撤掉，别挂空壳
-- `repositories/user.py:58` 等 `logger.exception(e)` 用法不规范（e 被当 message，丢 traceback）→ 统一 `exc_info=e`
-- 对话链路**没有把用户身份注入 prompt**（见 §6）
-- 无测试、无 Docker、无压测数据（见 §7 阶段 0）
-- `.gitignore` 已正确忽略 `.env`/`.venv/`/`logs/` ✅（开源入场券已达标一项）
+- ~~三个"预留"空壳路由 `knowledge/asset/ws`：**决定去留**~~ → ⏳ **仍挂空壳**（knowledge/asset 零端点；ws 是最小回声）
+- ⏳ `repositories/user.py:58` 等 `logger.exception(e)` 用法不规范（e 被当 message，丢 traceback）→ 统一 `exc_info=e`
+- ~~对话链路**没有把用户身份注入 prompt**（见 §6）~~ → ⚠️ **部分解决**：schema 与 state 字段已就位，但**没有节点往里写**（见 §6 的更正）
+- ⏳ 无测试、无 Docker、无压测数据 → 已部分推进：`scripts/verify_core.py` 是**可运行的 12 项断言**，但还不是 pytest 体系
+- ~~`.gitignore` 已正确忽略 `.env`/`.venv/`/`logs/` ✅~~ → ✅ **并已加固**：新增前端构建产物（**`frontend/src-tauri/target` 4.25 GB，原来没被忽略**）、`.uv-cache/`、`.venv*/` 通配、`knowledge/` 裸规则兜底
 
 ---
 
@@ -132,9 +177,23 @@ PostgreSQL (消息/会话)  +  Redis (热缓存/会话/限流计数)
 
 ## 六、功能缺口：让 AI 记住用户称呼
 
-**现状**：`SYSTEM_PROMPT` 是静态字符串（`prompts/furina.py:4`），`stream_chat` 拼 messages 只用「system + 历史 + 当前输入」，`chat.py` 加载的 `user` 对象仅用于归属校验后被丢弃——**AI 根本看不到 `user_name`/`personal_preference`**。
+> ⚠️ **本章已过时（2026 本次重构会话更正）。**
+> 原文说"AI 根本看不到 `user_name` / `personal_preference`"——**实测不是这样**：
+>
+> | 原文断言 | 实测结果 |
+> |---|---|
+> | `SYSTEM_PROMPT` 是静态字符串 | ✅ 属实：`prompts/furina.py:4` 仍是 `"你是原神中的水神芙宁娜"`（87 字节） |
+> | 加载的 `user` 对象被丢弃 | ✅ 属实 |
+> | **"AI 根本看不到 `user_name`/`personal_preference`"** | ❌ **不准**：`UserOut` 已回传 `personal_preference`（`schemas/model.py:52`）；`SupervisorState` 已声明 `user_name` / `personal_preference` 两个字段（`agent/state.py:31-33`） |
+>
+> **真实状态是"字段就位、没人往里写"** —— 这是几十行的事，不是需要改架构的事。
+> **如果你照本章原文去开工，会重做一遍已经做过的东西。**
+>
+> 本章下面保留原文，作为"文档漂移"的样本（见 AGENTS.md §一点五）。
 
-**结论**：改 `user_name` 不会让 AI 记住称呼，必须先打通 prompt 注入。
+**现状（原文，已过时）**：`SYSTEM_PROMPT` 是静态字符串（`prompts/furina.py:4`），`stream_chat` 拼 messages 只用「system + 历史 + 当前输入」，`chat.py` 加载的 `user` 对象仅用于归属校验后被丢弃——**AI 根本看不到 `user_name`/`personal_preference`**。
+
+**结论（原文）**：改 `user_name` 不会让 AI 记住称呼，必须先打通 prompt 注入。
 
 **方案（三处钩子）**：
 1. `prompts/furina.py`：静态常量改为 `build_system_prompt(user)` 函数，把 `user.user_name` / `user.personal_preference` 拼进去
@@ -230,17 +289,20 @@ Start ──▶ 用户画像注入 ──▶ 意图路由
 
 ## 十一、待办追踪（下次开工从这挑）
 
-- [ ] 修 PATCH /users/me 四个 bug（§4.1）
-- [ ] 删 `ORM.py`、处理限流器去留（§4.2）
-- [ ] 打通 prompt 注入，让 AI 认识用户（§6）
-- [ ] 搭 LangGraph 状态机取代 stream_chat（§7）
-- [ ] 定状态机工具清单 + checkpointer 存储选型（§7）
-- [ ] 落地 RAG 链路拆分（Rust /search + /index，§2）
-- [ ] 定 embedding 来源 / 向量库 / rerank 取舍（§2）
-- [ ] 定双模式人设方案（roleplay/code 人设卡切换，§7）
-- [ ] 设计代码工具集 + human-in-the-loop 审批流程（§7）
-- [ ] 阶段 0 剩余项（测试 / Compose / config 改造 / README）
-- [ ] LICENSE 选型
+> **图例**：~~删除线~~ = 已完成 ｜ ✅ = 已有实物但不完整 ｜ ⏳ = 未做 ｜ ❌ = 已废弃
+
+- ~~[ ] 修 PATCH /users/me 四个 bug（§4.1）~~ ✅ **已完成**（静态核对通过，未运行验证）
+- ~~[ ] 删 `ORM.py`、处理限流器去留（§4.2）~~ ✅ **已完成**：`ORM.py` 已删；限流器改为 `furina_core.limits.LocalTokenBucket`（**补上真实实现**，12 项断言通过）
+- [ ] 打通 prompt 注入，让 AI 认识用户（§6）→ ⚠️ **降级为小任务**：字段已就位，只差"往 state 里写"这一步
+- [ ] 搭 LangGraph 状态机取代 stream_chat（§7）→ 🚧 **进行中**：主管图装配了 `START→coder→END`，**5 个业务节点仍全是 `NotImplementedError`**
+- [ ] 定状态机工具清单 + checkpointer 存储选型（§7）→ ✅ **已定**：工具 = read/write/bocha 三件；checkpointer = **web 用 PG，desktop 用 SQLite**
+- [ ] 落地 RAG 链路拆分（Rust /search + /index，§2）→ ⏳ **暂缓**：先做 Python 模块，等压测数据再决定下沉（`lancedb` 已在依赖但零引用）
+- [ ] 定 embedding 来源 / 向量库 / rerank 取舍（§2）→ ✅ **部分已定**：**向量库选 LanceDB**（desktop 嵌入式，零外部服务）；embedding 来源与 rerank **仍未定**
+- [ ] 定双模式人设方案（roleplay/code 人设卡切换，§7）→ ✅ **已定**：`mode` 不是"人设文本开关"，是**能力清单开关**（roleplay 不挂工具、code 挂 tools + HITL）
+- [ ] 设计代码工具集 + human-in-the-loop 审批流程（§7）→ 🚧 **契约已定稿**（`WritePreview`/`ReviewRequest`/`ReviewDecision`），**但恢复链路没接**（`GET /agent/resume` 是 `pass`）
+- [ ] 阶段 0 剩余项（测试 / Compose / config 改造 / README）→ 🚧 部分：`scripts/verify_core.py`（12 项断言）；**Compose / README / pytest 体系仍缺**
+- [ ] LICENSE 选型 → ⏳ **未做**
+- [x] ~~重构为 uv workspace，依赖分开管理~~ ✅ **已完成**（本轮新增，详见 [DEV.md](DEV.md)）
 
 ---
 
@@ -378,13 +440,12 @@ middleware 的 `description` 可以传 callable 去算 diff，但返回类型是
 
 ### 14.5 重构清单（按依赖序）
 
-- [ ] **1. `state.py`** —— `State` 从 `messages` 单字段 → 强类型领域状态（至少含 `messages` / `mode` / 用户画像位）
-      ⚠️ 现状是 Pydantic `BaseModel`；LangGraph 的 `StateGraph` 对 `TypedDict` 支持更顺，**需先拍板用哪个**
-- [ ] **2. `node/coder.py`** —— `create_agent` → 手搓 ReAct 循环（model 节点 + tools 节点 + 条件边）
-- [ ] **3. `node/coder_tools.py`** —— `ReadFileTool` / `WriteFileTool` 补齐 `_run`；**写入工具内嵌 `interrupt()`**
-- [ ] **4. `graph.py`** —— `create_agent` supervisor → 手搓 `StateGraph`（§七 的五节点 + 条件边）
-- [ ] **5. `services/agent_stream.py`** —— `stream_mode="messages"` → `["messages","values"]`，接住 `interrupts`
-- [ ] **6. `tools.py`** —— `tool_node = ToolNode(...)` 目前是模块级单例且只含 `bocha_search_tool`，重构时一并处理
+- [x] ~~**1. `state.py`** —— `State` 从 `messages` 单字段 → 强类型领域状态~~ ✅ **已完成**：`SupervisorState` 含 `messages` / `mode` / `user_name` / `personal_preference` / `rag_result` / `subagent_task`；**已拍板用 Pydantic `BaseModel`**（不用 TypedDict），代价是抄官方示例时要翻译
+- [ ] **2. `node/coder.py`** —— `create_agent` → 手搓 ReAct 循环（model 节点 + tools 节点 + 条件边）→ 🚧 **循环已通**（`prepare`/`model`/`tools`/`review` 四节点 + 条件边），但 `execute_node` 是**空函数体且未 add_node**
+- [ ] **3. `node/coder_tools.py`** —— `ReadFileTool` / `WriteFileTool` 补齐 `_run`；**写入工具内嵌 `interrupt()`** → ⚠️ **改为图节点 `review_node` 内 `interrupt()`**（NOTES 记录了推翻理由：工具保持纯净 + 多个 tool_calls 一次审批 + 拒绝后能 `Command(goto=...)` 真打回）
+- [ ] **4. `graph.py`** —— `create_agent` supervisor → 手搓 `StateGraph`（§七 的五节点 + 条件边）→ 🚧 **只装配了 `START→coder_graph→END`，五节点仍是占位**
+- [ ] **5. `services/agent_stream.py`** —— `stream_mode="messages"` → `["messages","values"]`，接住 `interrupts` → ❌ **未做**（循环体首行仍是 `raise NotImplementedError`）
+- [ ] **6. `tools.py`** —— `tool_node = ToolNode(...)` 目前是模块级单例且只含 `bocha_search_tool` → ❌ **未做**
 
 ### 14.6 必须保留的验证实验
 
@@ -403,11 +464,11 @@ middleware 的 `description` 可以传 callable 去算 diff，但返回类型是
 
 ### 14.8 开放问题（写代码前定）
 
-- **Q1** `State` 用 `TypedDict` 还是 Pydantic `BaseModel`？（现状是 BaseModel）
-- **Q2** coder 走 A 路线还是 B 路线？（见 14.4，倾向 B）
-- **Q3** 手搓的 ReAct 循环，工具错误处理是自己写还是复用 `ToolNode`？（复用可省事，但 `ToolNode` 是否限制后续扩展待验）
-- **Q4** diff 预览：工具内 `interrupt()` 读旧文件算 diff —— 旧文件读不到（新建）时 payload 长什么样？
-- **Q5** §七 的"意图路由"用规则优先还是 LLM 优先？（原 PLAN 写"规则优先，LLM 兜底"）
+- **Q1** `State` 用 `TypedDict` 还是 Pydantic `BaseModel`？→ ✅ **已定：Pydantic `BaseModel`**（`state.py:6-9` 有拍板记录）。代价是官方文档多为 TypedDict 示例，抄的时候要翻译
+- **Q2** coder 走 A 路线还是 B 路线？→ ✅ **已定：B 路线（子图节点）**，且 **2026-09-15 已实测中断能冒泡到父图**（`result["__interrupt__"]` 出现、`next: ('coder_graph',)`、子图私有字段未泄漏）
+- **Q3** 手搓的 ReAct 循环，工具错误处理是自己写还是复用 `ToolNode`？→ ✅ **已定且已验证：复用 `ToolNode(handle_tool_errors=True, messages_key="coder_messages")`**。源码确认它 `except GraphBubbleUp: raise`（中断会冒泡），注释点名 supervisor 场景
+- **Q4** diff 预览：工具内 `interrupt()` 读旧文件算 diff —— 旧文件读不到（新建）时 payload 长什么样？→ ✅ **已定**：`WritePreview.is_new_file=True` + `old_hash=None` + `diff=""`（`agent_dependencies.py:122-129` 的 `target.is_file()` 分支）。**⚠️ 但遗留一个未处理的边界：路径存在但是【目录】时 `is_file()` 返回 False → 被误判成"新文件"**，用户会批一个注定 `IsADirectoryError` 的操作
+- **Q5** §七 的"意图路由"用规则优先还是 LLM 优先？→ ✅ **已定（本轮讨论）：规则优先，且是零成本的规则** —— `mode` 由客户端声明（web 默认 roleplay / desktop 默认 code），**图里不猜**。判据：`mode` 决定"谁能被调用"，`route_edge` 只决定"这一步要不要检索"，两者不是一回事
 
 ---
 
