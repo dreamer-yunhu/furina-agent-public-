@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from langgraph.graph.message import add_messages
 
-from furina_desktop.agent.contracts import ReviewRequest
 
 
 class SupervisorState(BaseModel):
@@ -49,6 +48,17 @@ class SupervisorState(BaseModel):
     #   边界：路由用规则优先还是 LLM 兜底（PLAN §七 原定"规则优先，LLM 兜底"）
 
 class CoderState(BaseModel):
-    coder_messages: Annotated[list, add_messages]
-    pending_reviews : ReviewRequest|None = Field(default=None) #表示当前是否有等待处理的审核——载荷快照
-    decision_reviews:list|None = Field(default=None)
+    # <- AI 改动：补上 subagent_task。
+    #    原因：prepare_node 一直在读它，但子图状态里没有这个字段，实测直接
+    #    AttributeError（阶段 1 报告 B1）。父图的同名字段会通过 add_node 传进来。
+    subagent_task: str | None = Field(default=None)
+    coder_messages: Annotated[list, add_messages] = Field(default_factory=list)
+    # <- AI 改动：两个审批字段都改成 **纯 dict**。
+    #    原因：LangGraph 落 checkpoint 时会对自定义类型告警
+    #    "Deserializing unregistered type ... will be blocked in a future version"，
+    #    实测已出现（ReviewRequest）。状态里只放 JSON 可序列化的数据，
+    #    到节点边界再用 Pydantic 校验，既不会随 LangGraph 版本变化而坏，
+    #    InMemory / SQLite / PG 三种 saver 的行为也一致。
+    #    复核重点：dict 的形状校验现在由 execute_node 负责，别再偷偷塞别的类型。
+    pending_reviews: dict | None = Field(default=None) #表示当前是否有等待处理的审核——载荷快照
+    decision_reviews: dict | None = Field(default=None)

@@ -11,6 +11,11 @@
 
 import uuid
 from fastapi import HTTPException,status
+# <- AI 改动：补三个缺失的导入。
+#    原文件在 db_list_threads / db_count_threads / db_rename_thread 里用了
+#    select / func / update，但从未导入；实测调用直接 NameError（阶段 1 报告 B7）。
+#    复核重点：这只是补导入，没改 SQL 语义。
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from furina_core.checkpoint import CheckpointStore
 from furina_core.models import User, AgentThreadID

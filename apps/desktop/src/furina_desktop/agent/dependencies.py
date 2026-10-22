@@ -7,9 +7,9 @@ import difflib
 from langchain_core.messages import ToolMessage
 from langchain_protocol import ToolCall
 from langgraph.types import Command
-from furina_core.errors import InvalidToolError, InvalidArgumentError, \
+from furina_core.errors import InvalidArgumentError, \
     MissingRequiredArgumentError
-from furina_desktop.agent.contracts import ReviewAction, ReviewDecision, WritePreview
+from furina_desktop.agent.contracts import ReviewAction, ReviewDecision, ReviewRequest, WritePreview
 from furina_desktop.agent.tools.registry import registry, ToolRegistry
 
 
@@ -158,92 +158,103 @@ async def build_tool_messages(tc:dict,
         status= "error",
     )
 
+# <- AI 改动：整个函数重写。
+#   原实现有两个错误（阶段 1 报告 B2）：
+#     ① set(raw_tool_calls) 对 list[dict] 做集合 → TypeError: unhashable type: 'dict'
+#     ② difference(risky_tools) 把**所有安全工具**也算成"幻觉工具"
+#   现改为按 name 分三堆，未知工具不抛异常、由调用方回填错误消息（fail-closed）。
+#   复核重点：返回顺序从 (risky, unknown) 变成 (risky, safe, unknown)，
+#   调用方必须同步改；registry 参数已删除（它原本就没被用到）。
 async def classify_tool_calls(raw_tool_calls,
                               risky_tools:set[str],
-                              safe_tools:set[str],
-                              *,registry:set[str])->tuple[list,list]:
+                              safe_tools:set[str])->tuple[list,list,list]:
     """
-    分离大模型的原始工具调用，以及判断是否编造工具
-    :param registry: 工具注册表
-    :param safe_tools: 安全工具注册表
-    :param risky_tools: 危险工具注册表
-    :param raw_tool_calls: 模型原始工具的调用
-    :return: 危险和未知工具列表
+    分离大模型的原始工具调用
+    :param safe_tools: 安全工具名单
+    :param risky_tools: 高风险工具名单
+    :param raw_tool_calls: 模型原始工具的调用（list[dict]，不是 set）
+    :return: (高风险, 安全, 未知)
     """
-    _risky = []
-    _unknown = []
-    raw_tool_set = set(raw_tool_calls)
-    fake_tool = raw_tool_set.difference(risky_tools)
-    if fake_tool:
-        raise InvalidToolError(
-            invalid_tools= list(fake_tool),
-        )
+    _risky: list = []
+    _safe: list = []
+    _unknown: list = []
     for raw in raw_tool_calls:
-        if raw.get("name") in risky_tools:
+        name = raw.get("name")
+        if name in risky_tools:
             _risky.append(raw)
-        elif raw.get("name") not in safe_tools:
-            _unknown.append(raw)
+        elif name in safe_tools:
+            _safe.append(raw)
         else:
-            continue
-    return _risky,_unknown
+            _unknown.append(raw)
+    return _risky, _safe, _unknown
 
 
 #定义回复执行函数
-async def handle_review_fn(*,payload:ReviewDecision,
+# <- AI 改动：整函数重写。
+#   原实现的问题（阶段 1 报告 B6/B9）：
+#     ① 三处裸 `raise` → RuntimeError，后面的回填逻辑永远不可达
+#     ② 用 payload/risky_tools 的"数量相等"判断完整性，而不是按 tool_call_id 对齐
+#     ③ 拿 registry.coder_tools_args（所有工具参数名的并集）和单次调用比较
+#   现改为：按 tool_call_id 对齐 + 未知 id 拦截 + 明确返回 Command。
+#   复核重点：拒绝时仍然是"整批不执行"（与现状语义一致）；V1 是否要改成
+#   逐条执行，等确认后再动（总案 Q4）。
+async def handle_review_fn(*,decision:ReviewDecision,
+                           snapshot:ReviewRequest,
                            raw_tool_calls:list[dict],
-                           risky_tools:list,
-                           raw_args_registry:set[str]
-                           ):
-    #验证载荷
-    if  not isinstance(payload,ReviewDecision):
-        raise
-        return Command(
-            update ={"coder_messages":[
-                await build_tool_messages(tc) for tc in raw_tool_calls
-            ]},
-            goto="model_node")
-    #验证工具数目
-    tool_list = payload.decisions or []
-    if len(tool_list) != len(risky_tools):
-        raise
+                           )->Command:
+    decided = {d.tool_call_id: d for d in decision.decisions}
+    sent_ids = {r.tool_call_id for r in snapshot.requests}
+
+    # 完整性：每个送审项都必须有且只有一个决定
+    missing = [tid for tid in sent_ids if tid not in decided]
+    if missing:
         return Command(
             update={"coder_messages": [
-                await build_tool_messages(tc, content="接收的数据不全！") for tc in raw_tool_calls
+                await build_tool_messages(tc, content="审批结果不完整，请重新审批！")
+                for tc in raw_tool_calls
             ]},
-            goto="model_node"
+            goto="model_node",
         )
-    #校验参数是否齐全
-    if registry.coder_tools_args != raw_args_registry:
-        raise
+    # 合法性：不能对没有送审的调用做决定（防伪造/串批）
+    extra = [tid for tid in decided if tid not in sent_ids]
+    if extra:
         return Command(
-            update={"coder_messages":[
-                await build_tool_messages(tc,content="缺少必要参数") for tc in raw_tool_calls
+            update={"coder_messages": [
+                await build_tool_messages(tc, content="审批结果包含未知的调用，已阻止执行！")
+                for tc in raw_tool_calls
             ]},
-            goto="model_node"
+            goto="model_node",
         )
+
     # 拒绝字典
     reject = {
-        # 加or的原因是前端传null不是空！
-        d["tool_call_id"]: d.get("reason") or "用户拒绝批准！"
-        for d in tool_list
-        if d.get("action") != ReviewAction.APPROVE.value
+        tid: (d.reason or "用户拒绝批准！")
+        for tid, d in decided.items()
+        if d.action != ReviewAction.APPROVE
     }
     # 只要有拒绝的都要回填消息——openai格式要求，调用几个工具就要有几个ToolMessage
-    msg = [
-        await build_tool_messages(
-            tc,
-            content=f"用户拒绝，{reject[tc['id']]}"
-            if tc["id"] in reject else "同批次有操作被拒绝，本次未执行"
-        )
-        for tc in raw_tool_calls]
-    # 审批
-    # 全批准
-    if not reject:
-        return Command(goto="tools_node")
-    else:
+    if reject:
+        msg = [
+            await build_tool_messages(
+                tc,
+                content=f"用户拒绝，{reject[tc['id']]}"
+                if tc["id"] in reject else "同批次有操作被拒绝，本次未执行"
+            )
+            for tc in raw_tool_calls
+        ]
         return Command(
-            update={"coder_messages": msg},
-            goto="model_node")
+            update={
+                "coder_messages": msg,
+                "pending_reviews": None,
+                "decision_reviews": None,
+            },
+            goto="model_node",
+        )
+    # 全批准：清除快照，避免下一次轮次复用旧审批
+    return Command(
+        update={"pending_reviews": None, "decision_reviews": None},
+        goto="tools_node",
+    )
 
 
 
