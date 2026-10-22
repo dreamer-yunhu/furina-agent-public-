@@ -25,6 +25,8 @@ logs/
 data/
 # 临时诊断产物（我 inspect wheel 源码时留下的目录）
 .wheel-inspect/
+# 冒烟测试的临时数据库目录（smoke_checkpoint / smoke_task_models 会写这里）
+_smoke_tmp/
 # Python 编译缓存
 __pycache__/
 *.pyc

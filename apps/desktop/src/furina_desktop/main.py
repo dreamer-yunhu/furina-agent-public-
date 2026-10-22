@@ -72,6 +72,7 @@ from furina_desktop.storage.lifespan import (
     close_checkpoint_store,
     init_checkpoint_store,
 )
+from furina_desktop.storage.database import close_db, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -183,13 +184,24 @@ async def lifespan(app: FastAPI):
     """
     logger.info("桌面版启动中")
 
+    # ① 业务库（user / thread / task / execution / approval）
+    # <- AI 改动：新增这一步。原来 desktop 从未设置 app.state.async_session，
+    #    导致 get_session 在第一个请求就 AttributeError（阶段 1 报告 B8）。
+    try:
+        await init_db(app)
+    except Exception as exc:
+        logger.critical("业务数据库初始化失败，拒绝启动：%s", exc)
+        raise
+
+    # ② checkpoint 存储
     try:
         await init_checkpoint_store(app)
     except Exception as exc:
         logger.critical("SQLite checkpoint 初始化失败，拒绝启动：%s", exc)
+        await close_db(app)  # 回滚①
         raise
 
-    # 组装主管图。⚠️ 这是**编排层**的活，放在入口而不是存储层 ——
+    # ③ 组装主管图。⚠️ 这是**编排层**的活，放在入口而不是存储层 ——
     # 见 storage/lifespan.py 的模块 docstring（那里解释过为什么拆开）。
     try:
         from furina_desktop.agent.build import build_graph
@@ -200,13 +212,16 @@ async def lifespan(app: FastAPI):
         # 图装不起来也要回滚存储，否则 SQLite 文件句柄会留着
         logger.critical("主管图装配失败，拒绝启动：%s", exc)
         await close_checkpoint_store(app)
+        await close_db(app)
         raise
 
     logger.info("就绪，开始接收请求")
     yield
 
     logger.info("关闭中…")
+    # 关闭顺序与初始化相反
     await close_checkpoint_store(app)
+    await close_db(app)
     logger.info("已安全关闭")
 
 

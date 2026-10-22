@@ -322,3 +322,84 @@ $env:PYTHONPATH = "packages\core\src;apps\web\src;apps\desktop\src"
 | 审批 API（列表 / 决策 / resume） | ❌ 未做（`/agent/resume` 仍是 `pass`） |
 | 统一执行器 + DB 审批状态校验 + 幂等键 | ❌ 未做（阶段 3） |
 | SSE 桥接（`agent_stream` 仍是 `NotImplementedError`） | ❌ 未做 |
+
+---
+
+## 十一、2026-10-22：审批 V2 阶段 A（持久化地基）
+
+> 依据：`docs/2026-10-22-审批V2-任务层级-审查与迁移方案.md`
+> 已确认决策：`execution_id` 作为 LangGraph 运行 key、只做 desktop、
+> 补最小 `supervisor_node`、同步创建并立即执行。
+> **本阶段只落地表与数据库，不接图、不接 API、不做超时。**
+
+### 11.1 新增文件
+
+| 文件 | 作用 |
+|---|---|
+| `packages/core/src/furina_core/task/__init__.py` | 包再导出 |
+| `packages/core/src/furina_core/task/enums.py` | 四套状态机 + 校验失败码 |
+| `packages/core/src/furina_core/task/models.py` | `agent_task` / `agent_execution` / `approval_request` |
+| `packages/core/src/furina_core/task/repository.py` | 建记录 + 条件 UPDATE 状态迁移 |
+| `apps/desktop/src/furina_desktop/storage/database.py` | SQLite 业务库、外键、create_all、seed 本地用户 |
+| `apps/desktop/tests/smoke_task_models.py` | 阶段 A 的 21 项断言 |
+
+### 11.2 修改文件
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `apps/desktop/src/furina_desktop/main.py` | lifespan 增加业务库初始化；关闭时逆序关闭 | 顺序是"业务库 → checkpoint → 图"；失败要回滚已初始化的部分 |
+
+### 11.3 设计依据（为什么这么改）
+
+- **Task / Execution / Approval 三张表**：用户最新需求是四层
+  `Thread → Task → Execution → Approval`，现有代码只有 Thread。
+- **`execution.graph_thread_id` 唯一**：一次执行必须对应一个 LangGraph 现场，
+  否则同一线程多任务会共用 checkpoint（验收 #9）。
+- **`approval_request.execution_id` 必填**：新执行必然产生新审批，
+  旧授权不能因为"同线程/同任务"被继承。
+- **`redelegation_key` 唯一且可空**：失败重委派用唯一键防重复建任务；
+  初始任务为 NULL，SQLite/PG 都允许多个 NULL 并存。
+- **超时不改审批状态**：审批枚举只有 PENDING/APPROVED/REJECTED/REVOKED；
+  超时改 Task/Execution 的 SUSPENDED（阶段 B 实现）。
+- **SQLite 外键**：默认关闭，必须 `PRAGMA foreign_keys=ON`，否则外键只是装饰。
+- **本地用户 seed**：`auth.py` 的固定 User 不落库，而 `agentthreadid.user_id`
+  是外键；不 seed 就建不了线程。
+
+### 11.4 实测结果
+
+| 检查 | 结果 |
+|---|---|
+| `apps/desktop/tests/smoke_task_models.py` | ✅ **21/21** |
+| `apps/desktop/tests/smoke_approval_flow.py` | ✅ 15/15（未回归） |
+| `apps/desktop/tests/smoke_checkpoint.py` | ✅ 14/14 |
+| `packages/core/tests/smoke_public_api.py` | ✅ 86/86 |
+| `scripts/verify_models.py desktop` / `web` | ✅ PASS / PASS |
+| `import furina_desktop.main` | ✅ OK |
+
+阶段 A 已证明：
+
+- 五张表能建出来；
+- 外键真的生效；
+- `idempotency_key` / `redelegation_key` / `graph_thread_id` 唯一约束生效；
+- 条件 UPDATE 只能抢到一次；
+- 审批状态与工具执行状态相互独立（APPROVED + SUCCEEDED）。
+
+### 11.5 尚未做（阶段 B/C）
+
+| 项 | 状态 |
+|---|---|
+| create-or-get 幂等创建（SAVEPOINT + IntegrityError） | ❌ |
+| Task/Execution 生命周期服务 | ❌ |
+| 审批决定 API + 服务端时间 vs deadline | ❌ |
+| 超时监控协程 + SUSPENDED | ❌ |
+| 迟到批准 + 恢复前校验 | ❌ |
+| 统一执行器（高风险工具从 ToolNode 移除） | ❌ |
+| 最小 supervisor_node + 重委派 | ❌ |
+| 图与 `task_id/execution_id/graph_thread_id` 接线 | ❌ |
+
+### 11.6 风险
+
+- `agentthreadid` 删除会通过 FK CASCADE 删掉任务/执行/审批历史。
+  若"保留审计记录"优先级高于"删线程"，后续需要改成软删除或 `ON DELETE RESTRICT`。
+- `create_all` 不做迁移；V2 只新增表所以够用，下次改列前必须引入 Alembic。
+- 超时监控尚未实现，当前 `deadline_at` 只是数据字段。
