@@ -14,7 +14,7 @@
     · 子类通过显式调用 `__init__()`，用 `message` 把错误消息传给基类的 `args`
     · 每个子异常内设业务字段，负责写入日志，方便排障
 
-⚠️ **已知契约不一致（搬运时发现，未修）**
+⚠️ **已知契约不一致（搬运时发现；2026 本轮已修一半）**
 
     `agent/dependencies.py`（原 `agent_dependencies.py`）以**关键字**方式构造这些异常：
 
@@ -30,13 +30,29 @@
     但 `is_legal_args` 里传的 `invalid_args_tools` 是**列表**，
     而本文件的分支判断只看 `isinstance(invalid_args, list)` ——
     **两者都该是 list 时才会走对分支**。这是潜在的静默错误，见 docs/NOTES.md 记账。
+
+──────────────────────────────────────────────────────────────────────
+对外契约（黑盒使用者只看这一段）
+──────────────────────────────────────────────────────────────────────
+
+    · 四个子类都暴露业务字段（`invalid_tools` / `missing_args` …），除 `message` 外都是
+      **原样存下你传进去的值**，不做校验、不做拷贝。
+    · `self.message` 与 `str(e)` **统一是 str**（本轮修复前，两个类的 else 分支会退化成
+      list 且 `str(e) == ""`）。多条目之间用单个空格连接。
+    · 参数"列表 / 单个字符串"两种写法都支持，但**分支只看第一个参数的类型**：
+      传 list 走"每条一句"；传字符串走"合成一句"。
+    · `code` 是类属性（如 `INVALID_TOOL`），用于日志分类，不参与 `args`。
 """
 
 # ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
 # 复核重点：
-#   1. 本文件是**逐字搬运**，我没有"顺手优化"任何逻辑。
-#      唯一的改动是模块 docstring（补了"已知契约不一致"这一节）。
-#   2. ★ 上面那段"已知契约不一致"是我的**分析**，不是原作者写的。
+#   1. 本文件最初是**逐字搬运**（只补了 docstring）。
+#   2. ★ 本轮修了一个真 bug：`MissingRequiredArgumentError` / `InvalidArgumentError`
+#      的 else 分支**漏调 `super().__init__()`** → `e.args == ()`、`str(e) == ""`、
+#      `e.message` 退化成 list。修法是在 else 分支补上与 if 分支相同的调用。
+#      实测影响的输入：两个参数里只要有一个**不是 list**（例如都传字符串）。
+#      现有调用点（desktop `is_legal_args`）传的都是 list，所以**改前也没暴露**。
+#   3. ★ 上面那段"已知契约不一致"是**我的分析**，不是原作者写的。
 #      请你确认：`is_legal_args` 里 `invalid_args_tools` / `missing_args_tools`
 #      到底是什么类型，以及 `isinstance` 那个分支是否真的走对了。
 
@@ -59,6 +75,11 @@ class MissingRequiredToolError(AgentError):
 
     def __init__(self, missing_tools: list[str] | str, message: None | str = None):
         self.missing_tools = missing_tools
+        # ── AI 改动 ── 复核重点：`message` 这个参数原来**被静默忽略**（签名里有、函数体从不读）。
+        #    现按签名承诺使用它；不传时行为与改前完全一致（走下面的默认文案分支）。
+        if message is not None:  # <- AI 改动
+            super().__init__(message)
+            return
         if isinstance(missing_tools, list):
             self.message = [f"{self.default_message}：{tools}" for tools in missing_tools]
             super().__init__(" ".join(self.message))
@@ -73,6 +94,9 @@ class InvalidToolError(AgentError):
 
     def __init__(self, invalid_tools: list[str] | str, message: None | str = None):
         self.invalid_tools = invalid_tools
+        if message is not None:  # <- AI 改动：原来被静默忽略（理由同 MissingRequiredToolError）
+            super().__init__(message)
+            return
         if isinstance(invalid_tools, list):
             self.message = [f"{self.default_message}：{tools}" for tools in invalid_tools]
             super().__init__(" ".join(self.message))
@@ -93,6 +117,9 @@ class MissingRequiredArgumentError(AgentError):
     ):
         self.missing_args = missing_args
         self.missing_args_tools = missing_args_tools
+        if message is not None:  # <- AI 改动：原来被静默忽略（理由同 MissingRequiredToolError）
+            super().__init__(message)
+            return
         if isinstance(missing_args, list) and isinstance(missing_args_tools, list):
             self.message = [
                 f"{self.default_message}：{tool}：缺少：{args}"
@@ -103,9 +130,12 @@ class MissingRequiredArgumentError(AgentError):
             self.message = [
                 f"{self.default_message}：{missing_args_tools}：缺少：{missing_args}"
             ]
-            # ⚠️ 原作者此处**没有调用 super().__init__()**（上面 if 分支里调了）。
-            #    搬运时保持原样，未擅自补上 —— 补上会改变 args 的内容。
-            #    复核时请判断：这是遗漏还是有意？
+            # ── AI 改动 ── 复核重点：这里原来**没有**调用 `super().__init__()`，
+            #    后果是 else 分支（两个参数只要有一个不是 list）下 `e.args == ()`、
+            #    `str(e) == ""` —— 异常对象带不出任何消息，而 `e.message` 又是个
+            #    **list**（其它分支被 super() 覆盖成字符串，类型不一致）。
+            #    现在补上，与 if 分支写法完全一致：`message` 统一为 str，args 非空。
+            super().__init__(" ".join(self.message))  # <- AI 改动
 
 
 class InvalidArgumentError(AgentError):
@@ -126,6 +156,9 @@ class InvalidArgumentError(AgentError):
     ):
         self.invalid_args = invalid_args
         self.invalid_args_tools = invalid_args_tools
+        if message is not None:  # <- AI 改动：原来被静默忽略（理由同 MissingRequiredToolError）
+            super().__init__(message)
+            return
         if isinstance(invalid_args, list):
             self.message = [
                 f"{self.default_message}：{tool}：出现幻觉参数：{args}"
@@ -136,4 +169,6 @@ class InvalidArgumentError(AgentError):
             self.message = [
                 f"{self.default_message}：{invalid_args_tools}：缺少：{invalid_args}"
             ]
-            # ⚠️ 同 MissingRequiredArgumentError：else 分支没有调用 super().__init__()
+            # ── AI 改动 ── 复核重点：同 MissingRequiredArgumentError，原 else 分支漏掉了
+            #    `super().__init__()`（args 为空、message 退化成 list）。已补齐。
+            super().__init__(" ".join(self.message))  # <- AI 改动

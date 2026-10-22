@@ -3,11 +3,12 @@
     session.py   FastAPI 的会话依赖（get_session）
 
 ⚠️ **这里没有 PG 引擎、没有 Redis、没有建表逻辑** —— 那些都是 web 专属，
-   在 `furina_web.storage`。core 的红线是"零存储实现"：
-   不 import asyncpg / psycopg / redis / sqlmodel。
+   在 `furina_web.storage`。core 的红线是"**零存储后端**"：
+   不 import asyncpg / psycopg / redis / lancedb。
 
-    （sqlalchemy 的 `AsyncSession` 与 `async_sessionmaker` 只是**类型**，
-      不引入后端驱动，所以允许。）
+   （`sqlmodel` / `sqlalchemy` 是允许的：`furina_core.models` 用它定义**共享的表结构**，
+     `sqlalchemy.ext.asyncio.AsyncSession` 只是**类型**，两者都不引入具体后端驱动。
+     这条边界上一轮被写成过"不 import sqlmodel"，实测不成立，已更正。）
 """
 
 # ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──

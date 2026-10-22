@@ -172,6 +172,17 @@ def require_token_type(payload: TokenPayload, expected: TokenType) -> None:
 # ⚠️ 密钥来源是这里唯一"不干净"的地方：从环境变量读，而不是从传入的 settings。
 #    理由：core 不 import 具体 app（红线二）。等 `furina_web.config` 建好后，
 #    更干净的做法是 web 侧显式传 key —— 那时这三个垫片可以删掉。
+#
+# ── AI 改动（本轮复核结论）── 复核重点，别跳过：
+#    2026 本轮把 web 侧 20 处调用点全部按 `TokenPayload` 属性访问改写完毕
+#    （auth/dependencies.py、services/user.py），**调用点已经不再依赖"垫片"这层兼容**，
+#    真正的迁移（web 显式传 key、删掉这三个函数）现在是可行的，但**我没有擅自删**：
+#      · 它是公开 API 的一部分（`from furina_core.security import create_access_token`
+#        是 web 现在正在用的写法），删掉要同时新增一个 web 侧 token 适配模块；
+#      · 这是设计决定，不是 bug 修复（AGENTS.md §二.3：只做有调用者的修改）。
+#    黑盒使用者请优先用 `create_token` / `decode_token`（密钥显式传）；
+#    这三个函数的契约、参数、TTL 常量写进了 packages/core/README.md。
+#    实测：密钥缺失时它们抛 `RuntimeError`（不是 TokenError），见 `_env_jwt_key`。
 
 _DEFAULT_ALGO = "HS256"
 _ACCESS_TTL_SECONDS = 3600
@@ -183,14 +194,19 @@ def _env_jwt_key() -> str:
 
     ⚠️ **缺失就报错，不给默认值** —— HS256 用一个写死的默认密钥，
        等于全世界都能伪造你的令牌。这是"fail-closed"而不是"能用就行"。
+
+    ── AI 改动 ── 复核重点：这里原来抛的是 `TokenError("invalid", ...)`，语义不对 ——
+       **"密钥没配"是配置错误，不是"令牌不可用"**。而调用方的标准做法是把 `TokenError`
+       翻成 401，那会把一次部署事故伪装成"用户令牌无效"，排障时极难定位。
+       现改为 `RuntimeError`（和 `CommonSettings.require_api_key()` 同一类错误），
+       让它老老实实变成 500。**如果你更希望它保持 TokenError，告诉我改回去。**
     """
     import os
 
     key = os.getenv("JWT_SECRET_KEY")
     if not key:
-        raise TokenError(
-            "invalid",
-            "缺少 JWT_SECRET_KEY —— 签发/校验令牌必须显式配置密钥，不能使用默认值。",
+        raise RuntimeError(  # <- AI 改动（原 TokenError("invalid", ...)）
+            "缺少 JWT_SECRET_KEY —— 签发/校验令牌必须显式配置密钥，不能使用默认值。"
         )
     return key
 

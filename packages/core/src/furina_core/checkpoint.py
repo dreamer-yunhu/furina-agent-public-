@@ -22,22 +22,30 @@
 二、设计取舍：协议对齐上游，而不是自定义
 ═══════════════════════════════════════════════════════════════════════
 
-**关键决定：本协议的 6 个方法，是照 LangGraph 的 saver 契约 1:1 定义的。**
+**关键决定：本协议的读/写/删方法，是照 LangGraph 的 saver 契约定义的。**
+**准确的账（2026 本轮核对上游源码后更正，原文写的是"6 个方法 1:1"，不对）**：
+
+    上游 `BaseCheckpointSaver` 的 async 方法有 6 个：
+        aget / aget_tuple / alist / aput / aput_writes / adelete_thread
+    本协议声明其中的 **5 个**（省略 `aget` —— 它只是 `aget_tuple` 的包装，
+    上游实现就是 `if value := await self.aget_tuple(config): return value.checkpoint`），
+    再加 **2 个生命周期方法**（setup / close），合计 **7 个成员**。
 
 理由：如果自定义一套"更好看"的接口，就需要在每个 LangGraph 调用点做双向适配，
 而**适配层本身就是要维护的代码**。对齐上游的好处是：
 
     · LangGraph 的 saver 天然满足本协议（结构化类型，不需要继承）
     · 业务代码只依赖本协议 → 换实现时业务代码一行不改
-    · 将来真要用别的图引擎（比如 Rust 重写），只需实现这 6 个方法
+    · 将来真要用别的图引擎（比如 Rust 重写），只需实现这 7 个方法
 
-上游契约出处（本机实测）：
-    `.venv-build/Lib/site-packages/langgraph/checkpoint/base/__init__.py`
-    第 417 / 429 / 443 / 468 / 491 / 511 行
+上游契约出处（本机实测，`.venv-build/Lib/site-packages/langgraph/checkpoint/base/__init__.py`）：
+
+    aget 416 / aget_tuple 428 / alist 442 / aput 467 / aput_writes 490 / adelete_thread 510
 
 ⚠️ **本文件刻意不 import langgraph**。用 `Any` 代替它的类型，
-   因为 core 的红线是"零框架依赖"（见 furina_core/__init__.py）。
-   代价：类型检查器帮不上忙。收益：core 不被任何图引擎绑死。
+   因为 core 不该被任何图引擎绑死（红线是"零存储后端 + 不依赖具体引擎"，
+   见 `furina_core/__init__.py`）。
+   代价：类型检查器帮不上忙。收益：换引擎时只改实现，不改业务代码。
 
 ═══════════════════════════════════════════════════════════════════════
 三、生命周期：为什么有 setup() 和 close()
@@ -50,7 +58,7 @@
 
 两者都不在上游的 6 个方法里 —— 上游只管"读写状态"，不管"怎么起怎么关"。
 但**应用确实需要它们**（现在的 `core/agent_graph.py` 就是在 lifespan 里手动做这两件事）。
-所以本协议**补上这两个**，作为第 7、8 个成员。
+所以本协议**补上这两个**，与上面 5 个合计 7 个成员。
 """
 
 # ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──

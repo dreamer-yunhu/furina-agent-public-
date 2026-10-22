@@ -1,8 +1,9 @@
-# 虚拟环境
+# 虚拟环境（.venv* 带通配，覆盖 .venv-build 这类临时环境）
 venv-furina/
 venv/
 ven/
 .venv/
+.venv*/
 # 密钥与配置
 .env
 *.key
@@ -10,12 +11,20 @@ ven/
 # 向量数据库（运行时生成）
 chroma_db/
 # 角色知识语料（版权内容，不随仓库跟踪/发布；磁盘文件保留）
+# ⚠️ 裸 knowledge/ 是兜底：重构后路径会变（apps/desktop/knowledge 等），
+#    只写 backend/knowledge/ 会在搬目录后失效，导致版权语料被误提交
+knowledge/
 backend/knowledge/
 # 临时文件与输出
 temp_images/
 output/
 logs/
 *.log
+# 运行时数据目录 —— SQLite checkpoint 数据库落在这里
+# （desktop 入口的 default_db_path() 是 `data/checkpoints.sqlite`）
+data/
+# 临时诊断产物（我 inspect wheel 源码时留下的目录）
+.wheel-inspect/
 # Python 编译缓存
 __pycache__/
 *.pyc
@@ -29,6 +38,8 @@ frontend/src-tauri/target/
 frontend/src-tauri/gen/
 frontend/dist/
 node_modules/
+# uv 本地缓存（工作区内，避免写用户目录被沙箱拒绝）
+.uv-cache/
 # 临时探针与个人数据（不进产品仓库）
 snapshot.txt
 *_probe_*.py
