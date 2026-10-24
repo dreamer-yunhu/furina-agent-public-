@@ -275,13 +275,16 @@ class AgentError(BaseModel):
 | `AgentExecution` | 一次执行；`graph_thread_id` 是 LangGraph 运行键 |
 | `ApprovalRequest` | 一行=一次工具调用；`idempotency_key` 唯一 |
 
-状态机要点：
+状态机要点（2026-10-24 与 `task/enums.py` 对齐；此前本节写的 `expired/cancelled` 并不存在）：
 
-- 审批态：`pending / approved / rejected / expired / cancelled`
-- 执行态：`not_started / running / succeeded / failed / unknown`
-- **`approved` ≠ 已执行**；只有 `approved + not_started` 能被条件 UPDATE 认领。
-- **超时只置 Task/Execution 为 `SUSPENDED`，不改审批状态**。
-- 写后读回不一致或超时 → `unknown`，**禁止自动重试**。
+- 任务态 `TaskStatus`：`QUEUED / RUNNING / WAITING_APPROVAL / SUSPENDED / COMPLETED / FAILED / CANCELLED`
+- 执行流程态 `ExecutionStatus`：`CREATED / RUNNING / WAITING_APPROVAL / SUSPENDED / VALIDATION_FAILED / COMPLETED / FAILED / CANCELLED`
+- 审批态 `ApprovalStatus`：`PENDING / APPROVED / REJECTED / REVOKED`（**没有 `EXPIRED`**）
+- 工具执行态 `ToolExecutionStatus`：`NOT_STARTED / RUNNING / SUCCEEDED / FAILED / UNKNOWN`
+- **`APPROVED` ≠ 已执行**；只有 `APPROVED + NOT_STARTED` 能被条件 UPDATE 认领。
+- **超时只置 Task/Execution 为 `SUSPENDED`，不改审批状态**；取消待审用 `REVOKED`。
+- 写后读回不一致或超时 → `UNKNOWN`，**禁止自动重试**。
+- 合法迁移表落码在 `task/lifecycle.py`（T19）：终态不可出、不允许回退到 `QUEUED`。
 
 ---
 

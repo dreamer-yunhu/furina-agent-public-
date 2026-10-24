@@ -134,8 +134,10 @@
 - **做法**：`SAVEPOINT` + `IntegrityError` + `args_hash` 语义校验。
 - **验收**：同一 `idempotency_key` 并发创建只落一行。
 
-### [ ] T19 Task / Execution 生命周期服务
-> 📋 准备文档：`docs/audit/2026-10-24-T19-0-准备工作与待拍板.md`（迁移表提案 + 事务边界 + 8 个待拍板问题）
+### [x] T19 Task / Execution 生命周期服务
+> ✅ 2026-10-24：`task/lifecycle.py`（迁移表 + 纯函数）、`task/lifecycle_service.py`（TransitionOutcome / 成对迁移 / 创建入口）、repository 两个 `transition_*` 加 `commit` 与静态校验；`smoke_lifecycle.py` 55/55。
+> 并发口径：同一进程、两个独立 Session；跨进程与 PG 未验证。
+> 📋 审计报告：`docs/audit/2026-10-24-T19-0-审计报告.md`（现状事实、迁移表现状 vs 提案、事务边界实测、测试缺口、Q1–Q8 待拍板）
 - **验收**：状态迁移只能按状态机走；非法迁移返回明确错误。
 
 ### [ ] T20 审批决定 API + 服务端时间

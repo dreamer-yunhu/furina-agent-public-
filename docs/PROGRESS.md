@@ -126,6 +126,19 @@
 - 未改 schema、依赖与 repository 提交接口；T19/T20/MCP 均未触碰。
 - 实测：`smoke_approval_service.py` 33/33；`smoke_task_models.py` 21/21；core 86/86；import OK。
 
+### 2026-10-24（续三）· T19 生命周期服务
+- T19-0 审计（`docs/audit/2026-10-24-T19-0-审计报告.md` + 决策上下文）：实测任意跳转、
+  跨 repository 调用部分提交、无状态一致性约束；拍板 Q1–Q8 全部按建议。
+- T19-1 `task/lifecycle.py`：Task 7 态 / Execution 8 态迁移表 + `is_legal_*` 纯函数；
+  终态无出口、禁止回退 `QUEUED`。矩阵穷举 49 + 64 对。
+- T19-2 `task/lifecycle_service.py`：`transition_task` / `transition_execution` /
+  `transition_pair`（同一事务，任一侧失败整体回滚）/ `create_execution_for_task`；
+  统一返回 `TransitionOutcome`（APPLIED/ILLEGAL/CONFLICT/NOT_FOUND/SCOPE_MISMATCH）。
+  repository 的两个 `transition_*` 加 `commit: bool = True` 并在内部做静态合法性校验。
+- Q8：修正 `WHITEPAPER §5.3` 与实际枚举不一致的审批态描述。
+- 实测：`smoke_lifecycle.py` 55/55；`smoke_task_models.py` 21/21；`smoke_approval_service.py` 33/33；全量 11 套全绿。
+- 未验证：跨进程并发、PostgreSQL 行为。
+
 ### 2026-10-23 · 删除旧单体 + 文档合并
 - 删除 `backend/`（60 个跟踪文件）；未跟踪语料 32 文件迁至 `knowledge/`；实验脚本归档 `scripts/experiments/`。
 - 实测：`import furina_desktop.main` → **IMPORT OK**。
@@ -142,6 +155,7 @@
 | `apps/desktop/tests/smoke_old_hash.py` | ✅ 8/8 | 2026-10-24 |
 | `apps/desktop/tests/smoke_coder_isolation.py` | ✅ 7/7 | 2026-10-24 |
 | `apps/desktop/tests/smoke_approval_service.py` | ✅ 33/33 | 2026-10-24 |
+| `apps/desktop/tests/smoke_lifecycle.py` | ✅ 55/55 | 2026-10-24 |
 | `apps/desktop/tests/smoke_tool_safety.py` | ✅ 25/25 | 2026-10-24 |
 | 真模型端到端（DeepSeek，含跨版本恢复） | ✅ | 2026-10-24 |
 | `apps/desktop/tests/smoke_http_resume.py` | ✅ 16/16 | 2026-10-24 |
@@ -243,6 +257,11 @@ cd C:\furina-agent
 | `agent/dependencies.py` | `build_write_review` 计算缺失祖先目录 | 只列**尚不存在**的；越界路径在更早的 resolve 已被挡 |
 | `task/service.py` | 新增 T18 审批服务 | ① SAVEPOINT 不能换成 try+commit；② 幂等键不含 args_hash；③ `as_utc` 是所有时间比较的前置 |
 | `apps/desktop/tests/smoke_approval_service.py` | 新建 T18 测试 | 并发用例依赖 SQLite 写锁，换 PG 要重验错误类型 |
+| `task/lifecycle.py` | 新增迁移表 + 纯函数（T19） | 唯一规则来源，别在别处再写一份；终态=空集合 |
+| `task/lifecycle_service.py` | 新增生命周期服务（T19） | `transition_pair` 要求 session 无已开启事务；失败一律返回 CONFLICT 表示“未生效” |
+| `task/repository.py` | 两个 `transition_*` 加 `commit` + 静态合法性 | 返回 False 同时代表“非法配对”与“CAS 未命中”，需要区分请走 service |
+| `apps/desktop/tests/smoke_lifecycle.py` | 新建 T19 测试 | 并发=同进程两 Session；失败注入用 monkeypatch |
+| `docs/WHITEPAPER.md` | §5.3 状态描述与枚举对齐 | 审批态无 EXPIRED；取消用 REVOKED |
 
 
 ### 2026-10-23 · 删除旧单体 + 文档合并
