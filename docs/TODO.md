@@ -138,13 +138,16 @@
 > ✅ 2026-10-24：`task/lifecycle.py`（迁移表 + 纯函数）、`task/lifecycle_service.py`（TransitionOutcome / 成对迁移 / 创建入口）、repository 两个 `transition_*` 加 `commit` 与静态校验；`smoke_lifecycle.py` 55/55。
 > 并发口径：同一进程、两个独立 Session；跨进程与 PG 未验证。
 > 📋 审计报告：`docs/audit/2026-10-24-T19-0-审计报告.md`（现状事实、迁移表现状 vs 提案、事务边界实测、测试缺口、Q1–Q8 待拍板）
+> 🔁 2026-10-24 变更：新增受保护边 `RUNNING→SUSPENDED` + `suspend_after_resume_failure`
+> （Q11=B 前置）；默认 API 拒绝该边，仅专用入口在工具未开始时可用。
 - **验收**：状态迁移只能按状态机走；非法迁移返回明确错误。
 
 ### [x] T20 审批决定服务（服务端时间 / 幂等 / 冲突）
 > ✅ 2026-10-24：`task/decision_service.py`（`submit_decision` + `DecisionOutcome` + `DecisionResult`）；`smoke_decision_service.py` 38/38。
 > ⚠️ 原验收写“过期决定不生效”，与 T20-0 拍板 Q4（允许保存迟到决定，仅用于分类）冲突；已按拍板执行，并在 ADR 记录。
 > 不修改 Task/Execution（恢复属 T22）；不做运行接线（T23）。
-- **验收**：决定使用服务端时间与 `deadline_at` 比较；过期决定不生效。
+- ~~**验收**：决定使用服务端时间与 `deadline_at` 比较；过期决定不生效。~~
+  已被 T20-0 拍板 Q4 取代：迟到决定**允许保存**，仅按 `late` 分类，不作为拒绝条件。
 
 ### [x] T21 超时扫描协程
 > ✅ 2026-10-24：`task/timeout_scanner.py`（scan_once/ScanReport/回调）+ `list_due_pending_approvals` + desktop 后台循环与配置；`smoke_timeout_scanner.py` 46/46。
@@ -152,8 +155,11 @@
 > 未验证：跨进程、PostgreSQL、运行时接线（等 T23）。
 - **验收**：超时只把 Task/Execution 置 `SUSPENDED`，**不改审批状态**。
 
-### [ ] T22 迟到批准 + 恢复前校验
-- **验收**：线程归属、图处于 interrupt、批内无 pending、batch 一致；任一不满足返回 409。
+### [x] T22 恢复前校验 + 成对恢复（服务层）
+> ✅ 2026-10-24：`task/resume_service.py`（`validate_and_resume` / `ResumeOutcome` / `ResumeResult`）；`smoke_resume_service.py` 26/26。
+> 覆盖：批准/迟到批准恢复、PENDING/REJECTED/REVOKED、终态、工具已执行、DB 参数快照、`old_hash`、并发、回滚。
+> 按 Q9=A，**未接** `/agent/resume`；路由层原有的归属/中断/决定对齐校验保持不变。
+> 前置：T19 变更（受保护 `RUNNING→SUSPENDED`）已实施，`smoke_lifecycle.py` 74/74。
 
 ### [ ] T23 统一执行器，把高风险工具移出 ToolNode
 - **现状**：`ToolNode(coder_tools)` 含高风险工具（`coder.py:62`）。

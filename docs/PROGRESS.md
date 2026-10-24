@@ -162,6 +162,22 @@
 - 实测：`smoke_decision_service.py` 38/38；全量 13 套全绿。
 - 未验证：PostgreSQL、跨进程并发、运行时接线。
 
+### 2026-10-24（续六）· T19 变更：受保护的 RUNNING→SUSPENDED
+- 触发：T22 Q11=B（DB 已 RUNNING、图恢复失败需要可重试的挂起路径）。
+- `lifecycle.py`：新增边 + `GUARDED_*_EDGES` + `SuspendReason`；默认 API 拒绝该边。
+- `repository.transition_*` / `lifecycle_service.transition_pair` 增加 `guarded_ok`（默认 False）。
+- `lifecycle_service.suspend_after_resume_failure`：要求两者 RUNNING、该 Execution 下所有审批
+  `tool_execution_status == NOT_STARTED`；否则拒绝（已开始/UNKNOWN 不可安全重试）。
+- 实测：`smoke_lifecycle.py` 74/74（新增 17 条）。
+
+### 2026-10-24（续七）· T22 恢复前校验与成对恢复
+- `task/resume_service.py`：`validate_and_resume` / `ResumeOutcome` / `ResumeResult`。
+- 校验：存在与归属 → 状态对（WAITING 或 SUSPENDED，且两者一致）→ 批内无 PENDING →
+  全部 APPROVED → 工具未开始 → DB 参数快照 → `old_hash` 文件校验 → 成对迁移 RUNNING。
+- 迟到批准允许恢复；失败不改状态；CAS 冲突映射为 `ILLEGAL_STATE`（无 CONFLICT 结果）。
+- 未接 `/agent/resume`（Q9=A）；图侧绑定（C7）与 checkpoint 校验（C9）留 T23。
+- 实测：`smoke_resume_service.py` 26/26；全量 14 套全绿。
+
 ### 2026-10-23 · 删除旧单体 + 文档合并
 - 删除 `backend/`（60 个跟踪文件）；未跟踪语料 32 文件迁至 `knowledge/`；实验脚本归档 `scripts/experiments/`。
 - 实测：`import furina_desktop.main` → **IMPORT OK**。
@@ -178,7 +194,8 @@
 | `apps/desktop/tests/smoke_old_hash.py` | ✅ 8/8 | 2026-10-24 |
 | `apps/desktop/tests/smoke_coder_isolation.py` | ✅ 7/7 | 2026-10-24 |
 | `apps/desktop/tests/smoke_approval_service.py` | ✅ 33/33 | 2026-10-24 |
-| `apps/desktop/tests/smoke_lifecycle.py` | ✅ 55/55 | 2026-10-24 |
+| `apps/desktop/tests/smoke_lifecycle.py` | ✅ 74/74 | 2026-10-24 |
+| `apps/desktop/tests/smoke_resume_service.py` | ✅ 26/26 | 2026-10-24 |
 | `apps/desktop/tests/smoke_timeout_scanner.py` | ✅ 46/46 | 2026-10-24 |
 | `apps/desktop/tests/smoke_decision_service.py` | ✅ 38/38 | 2026-10-24 |
 | `apps/desktop/tests/smoke_tool_safety.py` | ✅ 25/25 | 2026-10-24 |
@@ -295,6 +312,11 @@ cd C:\furina-agent
 | `apps/desktop/tests/smoke_timeout_scanner.py` | 新建 | 用例间需清库，否则到期审批互相污染 |
 | `task/decision_service.py` | 新增 T20 决策服务 | 已有决定必须排在终态任务校验之前；数据库异常不映射为 outcome |
 | `apps/desktop/tests/smoke_decision_service.py` | 新建 T20 测试 | 并发用例依赖 SQLite 写锁；PG 未验证 |
+| `task/lifecycle.py` | T19 变更：加受保护边 + `SuspendReason` + `GUARDED_*` | 受保护边默认拒绝；新增受保护边时必须同步更新集合与专用入口 |
+| `task/repository.py` | `transition_*` 增加 `guarded_ok` | 默认 False；低层调用可直接放行，属于受控例外 |
+| `task/lifecycle_service.py` | `transition_pair` 增加 `guarded_ok`；新增 `suspend_after_resume_failure` | 专用入口只接受 `RESUME_FAILED`；工具已开始/UNKNOWN 一律拒绝 |
+| `task/resume_service.py` | 新增 T22 恢复服务 | 状态对必须一致；迟到允许；CAS 冲突映射 ILLEGAL_STATE；文件校验只读 |
+| `apps/desktop/tests/smoke_resume_service.py` | 新建 T22 测试 | 文件测试用临时沙箱；并发=同进程两 Session |
 
 
 ### 2026-10-23 · 删除旧单体 + 文档合并

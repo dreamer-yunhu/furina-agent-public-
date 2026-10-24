@@ -1,8 +1,13 @@
 # furina-core · 对外 API 说明书
 
-> **这个库是干什么的**：web 与 desktop **共用**的**无业务内核** —— 配置、共享枚举与表模型、
-> 认证原语（bcrypt + JWT）、熔断器与降级策略、路径边界、进程内限流、agent 状态持久化协议。
-> 它**不**连数据库、**不**认识 HTTP 状态码、**不**含任何业务逻辑。
+> **这个库是干什么的**：web 与 desktop **共用**的内核 —— 配置、共享枚举与表模型、
+> 认证原语（bcrypt + JWT）、熔断器与降级策略、路径边界、进程内限流、agent 状态持久化协议，
+> 以及 **`furina_core.task` 领域层**（Task / Execution / Approval 的状态机与 T18–T22 服务）。
+> 它**不**连数据库、**不**认识 HTTP 状态码；数据库会话由调用方传入。
+>
+> ⚠️ 早期版本自称“无业务内核”，**这一说法在 T19/T20 之后不再成立**：
+> `task/lifecycle.py` 与 `task/*_service.py` 就是共享的**业务规则**（状态机、审批决定、恢复校验）。
+> 它们仍是“无存储实现、无 HTTP、无图依赖”的纯领域层。
 >
 > **怎么读（黑盒使用者）**：§1 看它有什么 → §2 导入规则 → §3 契约与硬规则（**读完这节就能安全用**）
 > → §4 查具体 API 的参数。§5 之后是边界、限制、自检等杂项。
@@ -31,6 +36,7 @@
 | `furina_core.circuit_policies` | 两种降级策略 | 决定"打不通之后怎么办" | `fail_open`、`fail_closed` |
 | `furina_core.sandbox` | 路径越界守卫 | 模型给的文件路径不许跑出沙箱 | `PathJail`、`PathOutOfSandbox` |
 | `furina_core.limits` | 进程内令牌桶限流 | 限出站 LLM 调用（防成本失控） | `LocalTokenBucket`、`RateLimiter`、`RateLimitExceeded` |
+| `furina_core.task` | **领域层**：Thread → Task → Execution → Approval 的模型、状态机与 T18–T22 服务 | 审批生命周期：幂等创建、决定、超时挂起、恢复校验 | 见 §4.12 |
 
 **它明确不做的事**（不要指望）：
 
@@ -59,7 +65,7 @@ from furina_core import LocalTokenBucket                # ❌ 不行：包根不
 |---|---|
 | `import furina_core` | 合法，但只有 `__version__`；不会顺带加载 fastapi/bcrypt/sqlmodel |
 | `furina_core.__all__` | 只有 `["__version__"]` |
-| 少数子包有再导出 | `furina_core.limits` 导出 `LocalTokenBucket`/`RateLimiter`/`RateLimitExceeded`；`furina_core.storage` 导出 `get_session`。其余请从**模块**导入 |
+| 少数子包有再导出 | `furina_core.limits` 导出 `LocalTokenBucket`/`RateLimiter`/`RateLimitExceeded`；`furina_core.storage` 导出 `get_session`；`furina_core.task` 只再导出**枚举与模型**（见 §4.12.2/4.12.1），**服务一律从子模块导入**（如 `from furina_core.task.decision_service import submit_decision`） |
 
 **为什么值得这样用**：desktop 只用到 `limits` 时，不必因为一次 import 就把 `bcrypt`、
 `fastapi`、`sqlmodel` 全部拖进内存（实测：`import furina_core` 后这些模块都不在 `sys.modules`）。
@@ -409,6 +415,195 @@ await bucket.acquire(timeout=30)      # 愿意等：超时抛 RateLimitExceeded
 
 ---
 
+### 4.12 `furina_core.task` —— 领域层（T18–T22）
+
+**用途**：Thread → Task → Execution → Approval 四层的模型、状态机与服务。
+这是本库唯一包含**业务规则**的部分，但仍是纯领域层：不连库、不出 HTTP、不依赖 LangGraph、
+不执行工具。
+
+| 子模块 | 内容 |
+|---|---|
+| `task.models` | `AgentTask` / `AgentExecution` / `ApprovalRequest` |
+| `task.enums` | 四套状态枚举 + `ValidationFailureCode` |
+| `task.repository` | 最小读写 + CAS 条件迁移（不做业务编排） |
+| `task.service` | T18 幂等创建：参数规范化、哈希、幂等键、`as_utc` |
+| `task.lifecycle` | 迁移表、受保护边、`TransitionOutcome`、`SuspendReason` |
+| `task.lifecycle_service` | 单行/成对迁移、Execution 创建、恢复失败挂起 |
+| `task.decision_service` | T20 决策服务：幂等、冲突、终态、迟到 |
+| `task.timeout_scanner` | T21 到期扫描与成对挂起 |
+| `task.resume_service` | T22 恢复前校验与成对恢复 |
+
+#### 4.12.1 模型
+
+| 表 | 关键列 |
+|---|---|
+| `agent_task` | `id` / `thread_id`(FK) / `instruction` / `status` / `parent_task_id` / `failure_reason` / `redelegation_key`(UNIQUE) / 时间 |
+| `agent_execution` | `id` / `task_id`(FK) / `status` / `graph_thread_id`(UNIQUE) / `checkpoint_id` / `validation_failure_reason` / 时间 |
+| `approval_request` | `task_id` / `execution_id` / `tool_call_id` / `tool_name` / `args_json` / `args_hash` / `target_path` / `old_hash` / `idempotency_key`(UNIQUE) / `deadline_at` / `approval_status` / `tool_execution_status` / `decided_*` / `execution_*` |
+
+- 一个 Execution 允许**多条**审批（`execution_id` 有索引、无唯一约束）。
+- `checkpoint` 里**没有** approval 行与 tool_call 的绑定字段 —— 该绑定属 T23。
+
+#### 4.12.2 枚举
+
+| 枚举 | 值 |
+|---|---|
+| `TaskStatus` | `QUEUED / RUNNING / WAITING_APPROVAL / SUSPENDED / COMPLETED / FAILED / CANCELLED` |
+| `ExecutionStatus` | `CREATED / RUNNING / WAITING_APPROVAL / SUSPENDED / VALIDATION_FAILED / COMPLETED / FAILED / CANCELLED` |
+| `ApprovalStatus` | `PENDING / APPROVED / REJECTED / REVOKED`（**无 EXPIRED**） |
+| `ToolExecutionStatus` | `NOT_STARTED / RUNNING / SUCCEEDED / FAILED / UNKNOWN` |
+| `ValidationFailureCode` | `APPROVAL_MISMATCH / TASK_INVALID / ARGS_MISMATCH / OLD_HASH_MISMATCH / ALREADY_EXECUTED / CHECKPOINT_MISMATCH` |
+| `SuspendReason`（`lifecycle`） | `APPROVAL_TIMEOUT / RESUME_FAILED`（仅用于返回值/日志，**未持久化**） |
+
+#### 4.12.3 `task.repository` —— 最小读写 + CAS
+
+```python
+from furina_core.task import repository
+```
+
+| 分组 | 函数 |
+|---|---|
+| Task | `create_task` / `get_task` / `list_tasks` / `transition_task(..., commit=True, guarded_ok=False)` |
+| Execution | `create_execution` / `get_execution` / `list_executions` / `transition_execution(..., commit=True, guarded_ok=False)` |
+| Approval | `create_approval` / `get_approval` / `list_approvals` / `list_due_pending_approvals(now, limit)` / `decide_approval` / `claim_tool_execution` / `finish_tool_execution` |
+
+**契约**
+
+- 状态迁移一律是 `UPDATE ... WHERE status=:from`，返回 `bool`（是否抢到）。
+- `transition_*` 只做**静态配对合法性** + CAS，不判断“现在该不该迁”。
+- `commit=False` 供 Service 组合事务；默认 `True` 保持旧调用行为。
+- **受保护边** `RUNNING→SUSPENDED`：`guarded_ok=False`（默认）一律返回 `False`；
+  只有 `suspend_after_resume_failure` 会传 `True`。**不要在其他地方传 True。**
+- `list_due_pending_approvals` 已排除“Task/Execution 都已 SUSPENDED”的对；
+  否则超时后审批仍为 `PENDING`，会反复占满批量窗口（饥饿）。
+
+#### 4.12.4 `task.service` —— T18 幂等创建
+
+```python
+from furina_core.task.service import (
+    ApprovalConflict, as_utc, canonical_args_json, compute_args_hash,
+    create_or_get_approval, derive_idempotency_key,
+)
+
+row, created = await create_or_get_approval(
+    session, task_id=..., execution_id=..., tool_call_id=..., tool_name=...,
+    args={...}, deadline_at=now + timedelta(minutes=5),
+    target_path=None, old_hash=None,
+)
+```
+
+- 幂等键：`sha256("{execution_id}:{tool_call_id}")`，**不含** `args_hash`。
+- 参数哈希：`canonical_args_json`（键排序、紧凑、UTF-8）后 SHA-256。
+- 冲突：同键但 task/execution/tool_name/args_hash 不一致 → `ApprovalConflict`。
+- 唯一约束冲突用 **SAVEPOINT + flush** 捕获；不能写成 `try: commit() except IntegrityError`。
+- `as_utc()`：SQLite 读出的 naive 时间按 UTC 解释；**所有时间比较前必须调用**。
+
+#### 4.12.5 `task.lifecycle` —— 迁移表
+
+```python
+from furina_core.task.lifecycle import (
+    TASK_TRANSITIONS, EXECUTION_TRANSITIONS,
+    GUARDED_TASK_EDGES, GUARDED_EXECUTION_EDGES,
+    TransitionOutcome, SuspendReason,
+    is_legal_task_transition, is_legal_execution_transition,
+    is_guarded_task_edge, is_guarded_execution_edge,
+)
+```
+
+- 终态无出口；不允许回退 `QUEUED`。
+- `SUSPENDED` 出口：`RUNNING / FAILED / CANCELLED`。
+- `RUNNING → SUSPENDED` 是**受保护边**（T19 变更）。
+- `TransitionOutcome`：`APPLIED / ILLEGAL / CONFLICT / NOT_FOUND / SCOPE_MISMATCH`。
+
+#### 4.12.6 `task.lifecycle_service` —— 迁移编排
+
+```python
+from furina_core.task.lifecycle_service import (
+    transition_task, transition_execution, transition_pair,
+    suspend_after_resume_failure, create_execution_for_task,
+)
+```
+
+| 函数 | 说明 |
+|---|---|
+| `transition_task(session, *, task_id, from_status, to_status, failure_reason=None)` | 存在 → 合法性 → CAS；返回 `TransitionOutcome` |
+| `transition_execution(session, *, task_id, execution_id, from_status, to_status, validation_failure_reason=None, finished=False)` | 额外校验归属（`SCOPE_MISMATCH`） |
+| `transition_pair(session, *, task_id, execution_id, task_from, task_to, execution_from, execution_to, guarded_ok=False)` | 同一事务成对迁移；任一侧失败整体回滚，返回 `(task_outcome, execution_outcome)` |
+| `suspend_after_resume_failure(session, *, task_id, execution_id, reason=RESUME_FAILED)` | 受保护入口；要求两者 `RUNNING` 且该 Execution 下所有审批 `tool_execution_status == NOT_STARTED` |
+| `create_execution_for_task(session, *, task_id, graph_thread_id=None)` | 统一创建入口；Task 不存在 → `NOT_FOUND`，终态 → `ILLEGAL` |
+
+**Session 契约**：`transition_pair` / `suspend_after_resume_failure` 自己开/结束事务，
+要求传入**未开启事务**的 Session；`suspend_after_resume_failure` 会先只读校验再 `rollback()`。
+
+#### 4.12.7 `task.decision_service` —— T20
+
+```python
+from furina_core.task.decision_service import (
+    DecisionOutcome, DecisionResult, submit_decision,
+)
+
+result = await submit_decision(
+    session, approval_id=..., task_id=..., execution_id=...,
+    decision=ApprovalStatus.APPROVED, decided_by="local", reason=None, now=None,
+)
+```
+
+- `DecisionOutcome`：`APPLIED / IDEMPOTENT / CONFLICT / NOT_FOUND / SCOPE_MISMATCH / ILLEGAL_STATE`。
+- **判定顺序**：存在 → 归属 → 已有决定（同/反）→ 终态任务 → 服务端时间 → CAS → 重读。
+  已有决定必须优先于终态任务，否则任务完成后重放同一批准会破坏幂等。
+- 只接受 `APPROVED / REJECTED`；`REVOKED` 属取消流程。
+- 单行 CAS；数据库异常原样抛出，不映射为 outcome。
+- **不修改 Task/Execution**；恢复属 T22。
+
+#### 4.12.8 `task.timeout_scanner` —— T21
+
+```python
+from furina_core.task.timeout_scanner import ScanReport, scan_once
+
+report = await scan_once(session_factory, now=None, limit=50, on_suspended=None)
+```
+
+- 只把 `WAITING_APPROVAL → SUSPENDED`；**审批保持 `PENDING`**。
+- 每条候选独立 Session + `transition_pair`；只有 `(APPLIED, APPLIED)` 才调用回调。
+- `ScanReport` 字段：`candidates / suspended / not_due / already_decided / task_terminal /
+  task_not_waiting / execution_not_waiting / association_mismatch / pair_conflict /
+  deduped / callback_errors / errors`。
+- 回调默认只记日志，**不代表真实资源释放**。
+
+#### 4.12.9 `task.resume_service` —— T22
+
+```python
+from furina_core.task.resume_service import (
+    ResumeOutcome, ResumeResult, validate_and_resume,
+)
+
+result = await validate_and_resume(
+    session, task_id=..., execution_id=..., now=None, workspace_root=None,
+)
+```
+
+- 校验顺序：存在/归属 → 状态对（`WAITING/WAITING` 或 `SUSPENDED/SUSPENDED`）→
+  批内无 `PENDING` → 全部 `APPROVED` → 工具未开始 → DB 参数快照 → `old_hash` 文件校验 →
+  成对迁移到 `RUNNING`。
+- `ResumeOutcome`：`RESUMED / NOT_FOUND / SCOPE_MISMATCH / NOT_APPROVED /
+  PENDING_APPROVALS / ILLEGAL_STATE / ALREADY_EXECUTED / OLD_HASH_MISMATCH / ARGS_MISMATCH`。
+- 迟到批准**允许恢复**；校验失败**不改变状态**。
+- `old_hash is None`：目标文件不存在放行（新文件）；已存在则拒绝。
+- **不恢复图、不执行工具**；C7 图侧绑定与 C9 checkpoint 校验属 T23。
+
+#### 4.12.10 横向契约
+
+| 规则 | 说明 |
+|---|---|
+| outcome vs 异常 | 预期失败用结果对象；数据库/编程错误原样抛 |
+| 时间 | 统一 UTC；跨库比较前 `as_utc()` |
+| 事务 | Service 拥有事务；repository 默认自己 commit，组合时传 `commit=False` |
+| 并发 | 写只走 CAS；不以“先查再写”作为保证 |
+| 图 | core **不 import LangGraph**、不恢复图 |
+| 运行接线 | 截至 2026-10-24，T18/T20/T21/T22 服务**均无运行时调用方**（T23 负责接线） |
+
+---
+
 ## 五、边界：三条红线（机械检查）
 
 | 红线 | 内容 | 检查命令（应无输出） |
@@ -420,6 +615,10 @@ await bucket.acquire(timeout=30)      # 愿意等：超时抛 RateLimitExceeded
 **允许的框架依赖**（都写在 `pyproject.toml`）：`pydantic`、`sqlmodel` + `sqlalchemy`（共享表定义与会话类型）、
 `fastapi`（`Depends` / `get_session`）、`openai`（LLM 客户端工厂，**延迟导入**）、`bcrypt`、`pyjwt`、`python-dotenv`。
 "零框架依赖"是早期写下、实测不成立的红线，已废弃为"零存储后端"。
+
+**新增红线（T22 定案）：core 不 import LangGraph。**
+图恢复属于上层（桌面/T23），core 只做数据库事务内的校验与迁移。
+检查命令同上，把组换成 `langgraph`；`smoke_public_api.py` 的 `_BANNED` 已包含它。
 
 ---
 
@@ -439,6 +638,12 @@ await bucket.acquire(timeout=30)      # 愿意等：超时抛 RateLimitExceeded
 | 10 | `errors` 默认文案有**双冒号**（`工具：：a`） | 纯外观问题，模型/用户会看到 | 想清理就改 `default_message` 或模板 |
 | 11 | `CircuitBreaker` 的 `HALF_OPEN` 不限并发探测 | 冷却期一过，全部并发请求都会去打下游 | 下游很脆时把 `cooldown_seconds` 调大 |
 | 12 | `sandbox.PathJail` / `limits.LocalTokenBucket` **零调用者** | 库里有、产品里没接 | 要么接线（推荐 `PathJail` 替掉 desktop 的复制版），要么删掉 |
+| 13 | T18/T20/T21/T22 服务**无运行时调用方** | 只有测试在调；desktop 的 `/agent` 链路仍走图状态 | T23 负责 interrupt → approval 行与路由接线 |
+| 14 | approval 行 ↔ checkpoint tool_call **无绑定字段** | C7 图侧校验无法实现；C9 只在路由层做 | T23 补绑定 |
+| 15 | `resume_service` 的 CAS 冲突映射为 `ILLEGAL_STATE` | 调用方无法直接区分“并发被抢”与“状态非法” | 需要时新增 `CONFLICT` 结果值（公共接口变更） |
+| 16 | `SuspendReason` **不落库** | 无法按原因查询挂起任务 | 需要时新增列；当前无 Alembic，必须先引入迁移工具 |
+| 17 | SQLite 读出的时间是 naive | 直接与 aware 比较会 `TypeError` | 一律先 `as_utc()` |
+| 18 | T21 扫描循环在跑，但运行时无审批数据 | 线上不会自动挂起 | 等 T23 接线 |
 
 ---
 
@@ -453,6 +658,13 @@ $env:PYTHONPATH = "packages\core\src;apps\web\src;apps\desktop\src"
 
 # ② 熔断器 / 令牌桶的并发行为（12 项）
 .venv-build\Scripts\python.exe scripts\verify_core.py
+
+# ③ 领域层（T18–T22）契约
+.venv-build\Scripts\python.exe apps\desktop\tests\smoke_approval_service.py   # 33
+.venv-build\Scripts\python.exe apps\desktop\tests\smoke_decision_service.py   # 38
+.venv-build\Scripts\python.exe apps\desktop\tests\smoke_lifecycle.py          # 74
+.venv-build\Scripts\python.exe apps\desktop\tests\smoke_timeout_scanner.py    # 46
+.venv-build\Scripts\python.exe apps\desktop\tests\smoke_resume_service.py     # 26
 
 # ③ 表模型能不能真的被查询（两种模式**必须分进程**）
 .venv-build\Scripts\python.exe scripts\verify_models.py web

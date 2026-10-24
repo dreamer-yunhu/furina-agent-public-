@@ -285,6 +285,9 @@ class AgentError(BaseModel):
 - **超时只置 Task/Execution 为 `SUSPENDED`，不改审批状态**；取消待审用 `REVOKED`。
 - 写后读回不一致或超时 → `UNKNOWN`，**禁止自动重试**。
 - 合法迁移表落码在 `task/lifecycle.py`（T19）：终态不可出、不允许回退到 `QUEUED`。
+- T19 变更（2026-10-24）：`RUNNING → SUSPENDED` 是**受保护边**，默认 API 拒绝；
+  只有 `suspend_after_resume_failure` 在确认该 Execution 下没有任何工具开始执行后才可以迁。
+  `SUSPENDED` 因此有两种来源：审批超时（T21）与图恢复失败（T23）。
 
 ---
 
