@@ -12,17 +12,16 @@
 **刻意不包含**：多用户认证、Redis、邮件表单校验 —— 单用户本地应用没有这些语义。
 「限流熔断保留」但实现换成进程内版本（桌面端没有 Redis）。
 
-⚠️ 当前状态：本包只有骨架，源码正在从 backend/ 迁移过来。
+⚠️ 当前状态：**本包是唯一现行实现**。旧单体 `backend/` 已于 2026-10-23 删除。
 """
 
 # ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
 # 复核重点：纯文档占位（让 uv_build 找到模块）。
-# 搬 agent 代码时有四个已知坑（都在 AI-CHANGES.md 里）：
-#   1. `AsyncPostgresSaver` 要换掉 —— SQLite 是 LangGraph 官方支持的另一条路
-#      还是自管状态，**这个决定没做，是最大的未知**
-#   2. coder.py 里硬编码的 `C:/furina-agent/backend/app/prompt/coder.txt` 必须去掉
-#   3. `decision_review` 与 `decision_reviews` 的拼写不一致（静默不共享）
-#   4. `executor_node` 是空函数体且从未 add_node
+# 旧单体迁移的四个已知坑均已在 2026-10-22 修复：
+#   1. `AsyncPostgresSaver` → `SqliteCheckpointStore`（storage/local_store.py）
+#   2. 提示词硬编码路径 → `agent/prompts/loader.py`
+#   3. `decision_review` / `decision_reviews` 拼写 → 已统一
+#   4. `execute_node` 空函数体 → 已实现并注册（nodes/coder.py）
 
 __version__ = "0.1.0"
 

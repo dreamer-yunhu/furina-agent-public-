@@ -46,6 +46,14 @@ node_modules/
 snapshot.txt
 *_probe_*.py
 *.xlsx
+# ── AI 改动：运行时沙箱与临时产物 ──
+# sandbox/ 是 .env 里 SANDBOX_ROOT 指向的**运行时目录**（2026-10-24 起启动时自动创建）
+sandbox/
+# uv.lock 的升级前备份（回滚用，确认稳定后可删）
+uv.lock.bak-*
+# 每日改动的临时复核文件（给人看的，不是产品文档）
+docs/review/
+
 # 注意：backend/_t_review.py / _exp_a6.py / _demo_prompt.py 这类开发脚手架未被忽略，
 #       提交前必须显式排除，别用 git add -A
 # 该文件作用：告诉 Git 忽略虚拟环境、密钥、数据库缓存等不应提交的目录和文件

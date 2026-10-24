@@ -19,7 +19,7 @@
     1. **人设注入**：现在把 `state.messages` 原样丢给模型，没有 system prompt。
        而人设的来源是：
          · `agent/prompts/furina.txt` —— **实测 0 字节，是空的**
-         · `backend/knowledge/persona/` —— 128 KB 语料，**没有任何代码读它**
+         · `knowledge/persona/` —— 约 125 KB 语料，**没有任何代码读它**
        → M1 第一件事是填人设，第二件是接 RAG（M2）
     2. **用户画像**：`SupervisorState` 已有 `user_name` / `personal_preference` 字段
        （PLAN §6 的那个缺口），但**没有任何节点往里写**。本节点拼 prompt 时该用上。
