@@ -39,6 +39,12 @@ class SupervisorState(BaseModel):
     rag_result: str | None = Field(default=None)
 
     subagent_task: str | None = Field(default=None)
+
+    # ── T23：运行时标识（由 /agent 创建后传入）──
+    # 只放字符串，不放 ORM 对象；子图与父图同名，才能通过节点边界传进去。
+    task_id: str | None = Field(default=None)
+    execution_id: str | None = Field(default=None)
+
     # TODO: [状态-1] 用户画像位
     #   提示：§七 的「用户画像注入」节点往这里写 user_name / personal_preference
     #   边界：首次进入图时这个字段可能不存在 → TypedDict 下缺失 key 会 KeyError
@@ -57,6 +63,9 @@ class CoderState(BaseModel):
     #    原因：prepare_node 一直在读它，但子图状态里没有这个字段，实测直接
     #    AttributeError（阶段 1 报告 B1）。父图的同名字段会通过 add_node 传进来。
     subagent_task: str | None = Field(default=None)
+    # ── T23：审批必须绑定真实 Task/Execution ──
+    task_id: str | None = Field(default=None)
+    execution_id: str | None = Field(default=None)
     coder_messages: Annotated[list, add_messages] = Field(default_factory=list)
     # <- AI 改动：两个审批字段都改成 **纯 dict**。
     #    原因：LangGraph 落 checkpoint 时会对自定义类型告警
@@ -67,3 +76,6 @@ class CoderState(BaseModel):
     #    复核重点：dict 的形状校验现在由 execute_node 负责，别再偷偷塞别的类型。
     pending_reviews: dict | None = Field(default=None) #表示当前是否有等待处理的审核——载荷快照
     decision_reviews: dict | None = Field(default=None)
+    # ── T23-4：本次获准执行的高风险批次（approval_id ↔ tool_call_id）──
+    # 只放字符串/字典，不放 ORM；由 execute_node 写入，guarded_tools_node 消费后清空。
+    approved_approvals: list[dict] | None = Field(default=None)

@@ -10,7 +10,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from furina_desktop.agent.contracts import ReviewDecision
+from furina_desktop.agent.contracts import ReviewAction, ReviewDecision
 # ↑ 依赖方向说明：api → agent 已经是既有方向（`api/agent.py` 本来就用 agent.build/stream）；
 #   `agent/contracts.py` 不反向依赖 api，所以不会成环。
 
@@ -42,3 +42,22 @@ class AgentResumeRequest(BaseModel):
 
     chat_thread_id: uuid.UUID
     review: ReviewDecision
+
+
+# ── T23-3：独立决定接口 ──
+class ApprovalDecisionItem(BaseModel):
+    """一条审批决定。
+
+    `approval_id` 优先；没有时退回 `tool_call_id`（兼容旧前端）。
+    两者都没有 → 422。
+    """
+
+    approval_id: uuid.UUID | None = None
+    tool_call_id: str | None = Field(default=None, max_length=128)
+    action: ReviewAction
+    reason: str | None = None
+
+
+class AgentDecisionRequest(BaseModel):
+    chat_thread_id: uuid.UUID
+    decisions: list[ApprovalDecisionItem] = Field(min_length=1)

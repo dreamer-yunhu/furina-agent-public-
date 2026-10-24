@@ -31,9 +31,13 @@ from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 from furina_core.config import settings  # noqa: E402
+from furina_core.task.enums import ApprovalStatus  # noqa: E402
 import furina_desktop.agent.nodes.coder as coder_mod  # noqa: E402
 from furina_desktop.agent.build import build_graph  # noqa: E402
 from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
+from _t23_testkit import config_for, make_runtime, new_thread, run_input  # noqa: E402
+from furina_desktop.agent.runtime import DecisionInput  # noqa: E402
+import uuid  # noqa: E402
 
 PASS, FAIL = "PASS", "FAIL"
 _results: list[tuple[str, bool]] = []
@@ -75,30 +79,63 @@ def sandbox() -> Path:
     return path
 
 
+_runtime = None
+_factory = None
+_user_id = None
+
+
+async def persist_review(graph, config, run, resume: dict) -> None:
+    """T23-4：直接驱动图也必须先把决定落库，否则认领会失败（fail-closed）。"""
+    snap = await graph.aget_state(config)
+    req_by_call = {
+        req["tool_call_id"]: req["approval_id"]
+        for interrupt in snap.interrupts
+        for req in ((interrupt.value or {}).get("requests") or [])
+    }
+    decisions = [
+        DecisionInput(
+            decision=(
+                ApprovalStatus.APPROVED
+                if d["action"] == "approve" else ApprovalStatus.REJECTED
+            ),
+            approval_id=uuid.UUID(req_by_call[d["tool_call_id"]]),
+            tool_call_id=d["tool_call_id"],
+            reason=d.get("reason"),
+        )
+        for d in resume["decisions"]
+    ]
+    await _runtime.submit_decisions(
+        thread_id=run.thread_id,
+        execution_id=run.execution_id,
+        decisions=decisions,
+        decided_by="test",
+    )
+
+
 async def run_case(name: str, tool_calls: list[dict], resume: dict | None = None):
-    """跑一个独立 thread，返回 (graph, config, fake, 首次结果)。"""
+    """跑一个独立 thread，返回 (graph, config, fake, 首次结果, run)。"""
     fake = FakeModel(tool_calls)
     coder_mod.llm_with_tools = fake
     graph = build_graph(InMemorySaver())
-    config = {"configurable": {"thread_id": name}}
-    first = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="执行任务")],
-            "mode": "code",
-            "subagent_task": "执行任务",
-        },
-        config,
-    )
+    thread_id = await new_thread(_factory, _user_id, name)
+    run = await _runtime.start_run(thread_id=thread_id, instruction="执行任务")
+    config = config_for(run)
+    first = await graph.ainvoke(run_input("执行任务", run), config)
     if resume is not None:
+        await persist_review(graph, config, run, resume)
         await graph.ainvoke(Command(resume=resume), config)
-    return graph, config, fake, first
+    return graph, config, fake, first, run
 
 
 async def main() -> None:
+    global _runtime, _factory, _user_id
     box = sandbox()
+    _engine, _factory, _runtime, _user_id = await make_runtime(
+        ROOT / "_smoke_tmp" / "approval_flow_db", sandbox=box
+    )
     print("=== 1. 安全工具：读文件，不进审批 ===")
     (box / "readme.txt").write_text("hello-furina", encoding="utf-8")
-    _, _, fake, _ = await run_case(
+    _, _, fake, _, _ = await run_case(
         "t-safe",
         [{"name": "read_file_tool", "args": {"file_path": "readme.txt"}, "id": "call_r1"}],
     )
@@ -107,7 +144,7 @@ async def main() -> None:
     check("模型收到读取结果", "hello-furina" in got, got[:60])
 
     print("\n=== 2. 高风险工具：批准后写入 ===")
-    graph, config, fake, first = await run_case(
+    graph, config, fake, first, approve_run = await run_case(
         "t-approve",
         [{"name": "write_file_tool", "args": {"file_path": "out.txt", "text": "approved!"}, "id": "call_w1"}],
     )
@@ -120,20 +157,17 @@ async def main() -> None:
         check("载荷绑定路径", req.get("path") == "out.txt")
         check("载荷含 diff", "approved!" in (req.get("diff") or ""))
 
-    await graph.ainvoke(
-        Command(
-            resume={
-                "type": "review_decision",
-                "decisions": [{"tool_call_id": "call_w1", "action": "approve", "reason": None}],
-            }
-        ),
-        config,
-    )
+    approve_resume = {
+        "type": "review_decision",
+        "decisions": [{"tool_call_id": "call_w1", "action": "approve", "reason": None}],
+    }
+    await persist_review(graph, config, approve_run, approve_resume)
+    await graph.ainvoke(Command(resume=approve_resume), config)
     check("批准后文件出现", (box / "out.txt").is_file())
     check("文件内容正确", (box / "out.txt").read_text(encoding="utf-8") == "approved!")
 
     print("\n=== 3. 高风险工具：拒绝后不写入 ===")
-    graph, config, fake, _ = await run_case(
+    graph, config, fake, _, _ = await run_case(
         "t-reject",
         [{"name": "write_file_tool", "args": {"file_path": "denied.txt", "text": "nope"}, "id": "call_w2"}],
         resume={
@@ -146,7 +180,7 @@ async def main() -> None:
     check("模型收到拒绝消息", "拒绝" in got, got[:80])
 
     print("\n=== 4. 未知工具：拦下并回填错误 ===")
-    graph, config, fake, _ = await run_case(
+    graph, config, fake, _, _ = await run_case(
         "t-unknown",
         [{"name": "hack_tool", "args": {}, "id": "call_x1"}],
     )
@@ -159,7 +193,7 @@ async def main() -> None:
     outside = box.parent / "escape.txt"
     if outside.exists():
         outside.unlink()
-    graph, config, fake, _ = await run_case(
+    graph, config, fake, _, _ = await run_case(
         "t-escape",
         [{"name": "write_file_tool", "args": {"file_path": "../escape.txt", "text": "x"}, "id": "call_e1"}],
     )
@@ -168,6 +202,10 @@ async def main() -> None:
     check("沙箱外文件未创建", not outside.exists())
     got = "".join(str(m.content) for m in fake.seen_tool_messages)
     check("模型收到载荷构造失败", "审批载荷构造失败" in got, got[:100])
+
+    from furina_desktop.agent.runtime import set_runtime
+    set_runtime(None)
+    await _engine.dispose()
 
     ok = sum(1 for _, o in _results if o)
     print(f"\n{ok}/{len(_results)} 通过")

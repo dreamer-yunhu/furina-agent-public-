@@ -7,7 +7,9 @@
 
     注：tools 节点内部调用会改文件的工具时，工具自带 interrupt() → 图在此暂停
 """
-from langchain_core.messages import AIMessage, RemoveMessage
+import uuid
+
+from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command,interrupt
 from langgraph.prebuilt import ToolNode
@@ -21,8 +23,10 @@ from furina_desktop.agent.llm import llm
 from pydantic import ValidationError
 from furina_desktop.agent.contracts import ReviewDecision, ReviewRequest
 from furina_core.config import settings
+from furina_core.task.enums import ToolExecutionStatus
 from furina_desktop.agent.dependencies import build_write_review, build_tool_messages, classify_tool_calls, \
     handle_review_fn
+from furina_desktop.agent.runtime import ApprovalDraft, ApprovalSetupError, get_runtime
 
 coder_tools = registry.coder_tool
 # 给模型绑定工具
@@ -68,6 +72,77 @@ async def model_node(state: CoderState):
 #复用langgraph的工具节点
 #注意，工具节点默认从messages字段取消息，而我的名称是coder_messages，所以得显示声明
 tool_node = ToolNode(coder_tools,handle_tool_errors=True,messages_key="coder_messages")
+
+
+async def guarded_tools_node(state: CoderState):
+    """T23-4：高风险批次先整批认领，执行后写终态；安全批次直接透传。
+
+    复核重点：
+      1. 认领失败 → 不执行任何工具，回填错误让模型重来。
+      2. 结果不确定 → UNKNOWN，禁止自动重放。
+      3. 只有 `approved_approvals` 非空时才走认领逻辑。
+    """
+    entries = state.approved_approvals or []
+    if not entries:
+        return await tool_node.ainvoke({"coder_messages": state.coder_messages})
+
+    runtime = get_runtime()
+    approval_ids = [uuid.UUID(item["approval_id"]) for item in entries]
+
+    if not await runtime.claim_batch(approval_ids):
+        latest = state.coder_messages[-1]
+        raw = latest.tool_calls if isinstance(latest, AIMessage) else []
+        return Command(
+            goto="model_node",
+            update={
+                "coder_messages": [
+                    await build_tool_messages(
+                        tc, content="工具执行权已被占用，本批次未执行任何操作"
+                    )
+                    for tc in raw
+                ],
+                "approved_approvals": None,
+            },
+        )
+
+    try:
+        result = await tool_node.ainvoke({"coder_messages": state.coder_messages})
+    except Exception:  # noqa: BLE001 —— 执行异常也要把认领状态落成 UNKNOWN
+        await runtime.finish_batch(
+            {item: (ToolExecutionStatus.UNKNOWN, None) for item in approval_ids}
+        )
+        raise
+
+    messages = result.get("coder_messages", []) if isinstance(result, dict) else []
+    by_call = {
+        message.tool_call_id: message
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id
+    }
+
+    outcomes: dict[uuid.UUID, tuple[ToolExecutionStatus, str | None]] = {}
+    for entry in entries:
+        message = by_call.get(entry["tool_call_id"])
+        if message is None:
+            status = ToolExecutionStatus.UNKNOWN
+            detail = None
+        elif getattr(message, "status", None) == "error":
+            status = ToolExecutionStatus.FAILED
+            detail = str(message.content)
+        elif getattr(message, "status", None) == "success":
+            status = ToolExecutionStatus.SUCCEEDED
+            detail = str(message.content)
+        else:
+            status = ToolExecutionStatus.UNKNOWN
+            detail = str(message.content)
+        outcomes[uuid.UUID(entry["approval_id"])] = (status, detail)
+
+    await runtime.finish_batch(outcomes)
+
+    if isinstance(result, dict):
+        result["approved_approvals"] = None
+        return result
+    return {"approved_approvals": None}
 
 #定义校验节点+预审批——放行全是安全工具的调用
 # <- AI 改动：重写，并注册进图（原实现从未 add_node，见阶段 1 报告 B3）。
@@ -122,6 +197,49 @@ async def prevalidate_node(state: CoderState):
                     await build_tool_messages(
                         tc,
                         content=f"审批载荷构造失败：{exc}"
+                    )
+                    for tc in raw_tool_calls
+                ]
+            }
+        )
+
+    # ── T23：先落库，再 interrupt ──
+    # 复核重点：这里失败必须 fail-closed —— 不进入 review_node，
+    # 否则前端会看到一个数据库里不存在的审批。
+    try:
+        if not state.task_id or not state.execution_id:
+            raise ApprovalSetupError("缺少 task_id/execution_id，无法持久化审批")
+        task_id = uuid.UUID(state.task_id)
+        execution_id = uuid.UUID(state.execution_id)
+        raw_by_id = {tc["id"]: tc for tc in risky}
+        drafts = [
+            ApprovalDraft(
+                tool_call_id=preview.tool_call_id,
+                tool_name=raw_by_id[preview.tool_call_id]["name"],
+                args=raw_by_id[preview.tool_call_id]["args"],
+                target_path=preview.path,
+                old_hash=preview.old_hash,
+            )
+            for preview in risky_review
+        ]
+        handles = await get_runtime().ensure_approvals(
+            task_id=task_id,
+            execution_id=execution_id,
+            drafts=drafts,
+        )
+        for preview in risky_review:
+            handle = handles.get(preview.tool_call_id)
+            if handle is None:
+                raise ApprovalSetupError(f"审批行缺失：{preview.tool_call_id}")
+            preview.approval_id = str(handle.approval_id)
+    except (ValueError, ApprovalSetupError) as exc:
+        return Command(
+            goto="model_node",
+            update={
+                "coder_messages": [
+                    await build_tool_messages(
+                        tc,
+                        content=f"审批持久化失败：{exc}"
                     )
                     for tc in raw_tool_calls
                 ]
@@ -191,6 +309,7 @@ async def execute_node(state: CoderState)->Command:
                 ],
                 "pending_reviews": None,
                 "decision_reviews": None,
+                "approved_approvals": None,
             },
         )
     return await handle_review_fn(
@@ -259,7 +378,7 @@ def build_coder(*,coder_prepare_node
 coder_graph = build_coder(
     coder_prepare_node=prepare_node,
     coder_model_node=model_node,
-    coder_tools_node=tool_node,
+    coder_tools_node=guarded_tools_node,
     coder_should_continue=should_continue,
     coder_review_node=review_node,
     coder_prevalidate_node=prevalidate_node,

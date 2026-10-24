@@ -34,6 +34,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from furina_core.config import settings  # noqa: E402
+from furina_core.task.enums import ApprovalStatus  # noqa: E402
 import furina_desktop.agent.nodes.coder as coder_mod  # noqa: E402
 from furina_desktop.agent.build import build_graph  # noqa: E402
 from furina_desktop.agent.contracts import ItemDecision, ReviewAction, ReviewDecision  # noqa: E402
@@ -46,6 +47,8 @@ from furina_desktop.agent.stream import (  # noqa: E402
 )
 from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
 from furina_desktop.api.contracts import AgentRequest  # noqa: E402
+from _t23_testkit import config_for, make_runtime, new_thread  # noqa: E402
+from furina_desktop.agent.runtime import DecisionInput  # noqa: E402
 
 PASS, FAIL = "PASS", "FAIL"
 _results: list[tuple[str, bool]] = []
@@ -138,12 +141,16 @@ async def main() -> None:
     box = make_box()
     coder_mod.llm_with_tools = FakeStream()
     graph = build_graph(InMemorySaver())
-    thread_id = uuid.uuid4()
+    engine, factory, runtime, user_id = await make_runtime(
+        ROOT / "_smoke_tmp" / "stream_bridge_db", sandbox=box
+    )
+    thread_id = await new_thread(factory, user_id, "stream")
+    run = await runtime.start_run(thread_id=thread_id, instruction="write it")
     request = AgentRequest(user_input="write it", chat_thread_id=thread_id)
 
     # ═══ 1. 首次 run ═══
     print("=== 1. first run: tokens + approval_required ===")
-    events = await collect(agent_stream(inform=request, graph=graph))
+    events = await collect(agent_stream(inform=request, graph=graph, run=run, runtime=runtime))
     t = types_of(events)
     check("has token frames", "token" in t, str(t))
     check("tokens assembled", "".join(e["content"] for e in events if e["type"] == "token") == "好的，")
@@ -175,7 +182,7 @@ async def main() -> None:
     # ═══ 2. 挂起期间再来一条消息 ═══
     print("\n=== 2. new message while suspended ===")
     calls_before = coder_mod.llm_with_tools.calls
-    events = await collect(agent_stream(inform=request, graph=graph))
+    events = await collect(agent_stream(inform=request, graph=graph, run=run, runtime=runtime))
     check("error=thread_suspended", events[0].get("code") == "thread_suspended", str(events[0]))
     check("pending ids echoed", events[0].get("pending_tool_call_ids") == ["call_w1"])
     check("done=interrupted", events[-1].get("status") == "interrupted")
@@ -184,11 +191,28 @@ async def main() -> None:
 
     # ═══ 3. 恢复 ═══
     print("\n=== 3. resume with approve ===")
-    config = {"configurable": {"thread_id": str(thread_id)}}
+    config = config_for(run)
     pending = await get_pending_tool_call_ids(graph=graph, config=config)
     check("pending ids readable", pending == ["call_w1"], str(pending))
+    snap = await graph.aget_state(config)
+    req_by_call = {
+        req["tool_call_id"]: req["approval_id"]
+        for interrupt in snap.interrupts
+        for req in ((interrupt.value or {}).get("requests") or [])
+    }
+    await runtime.submit_decisions(
+        thread_id=run.thread_id,
+        execution_id=run.execution_id,
+        decisions=[DecisionInput(
+            decision=ApprovalStatus.APPROVED,
+            approval_id=uuid.UUID(req_by_call["call_w1"]),
+            tool_call_id="call_w1",
+        )],
+        decided_by="test",
+    )
     events = await collect(agent_resume_stream(
-        graph=graph, chat_thread_id=thread_id, decision=approve("call_w1")
+        graph=graph, graph_thread_id=run.graph_thread_id,
+        decision=approve("call_w1"), execution_id=run.execution_id, runtime=runtime,
     ))
     t = types_of(events)
     check("has tool_end", "tool_end" in t, str(t))
@@ -205,7 +229,7 @@ async def main() -> None:
     print("\n=== 4. resume on a thread that is not suspended ===")
     fresh_thread = uuid.uuid4()
     events = await collect(agent_resume_stream(
-        graph=graph, chat_thread_id=fresh_thread, decision=approve("call_w1")
+        graph=graph, graph_thread_id=fresh_thread, decision=approve("call_w1")
     ))
     check("error=not_suspended", events[0].get("code") == "not_suspended", str(events[0]))
     check("done=completed", events[-1].get("status") == "completed")
@@ -214,13 +238,16 @@ async def main() -> None:
     print("\n=== 5. decision mismatch ===")
     # 换一个新假模型：上面 resume 已经把它推进到"不调工具"的第二次输出
     coder_mod.llm_with_tools = FakeStream()
-    mismatch_thread = uuid.uuid4()
+    mismatch_thread = await new_thread(factory, user_id, "mismatch")
+    mismatch_run = await runtime.start_run(thread_id=mismatch_thread, instruction="write it")
     await collect(agent_stream(
-        inform=AgentRequest(user_input="write it", chat_thread_id=mismatch_thread), graph=graph
+        inform=AgentRequest(user_input="write it", chat_thread_id=mismatch_thread),
+        graph=graph, run=mismatch_run, runtime=runtime,
     ))
-    mismatch_config = {"configurable": {"thread_id": str(mismatch_thread)}}
+    mismatch_config = config_for(mismatch_run)
     events = await collect(agent_resume_stream(
-        graph=graph, chat_thread_id=mismatch_thread, decision=approve("call_forged")
+        graph=graph, graph_thread_id=mismatch_run.graph_thread_id,
+        decision=approve("call_forged"), execution_id=mismatch_run.execution_id, runtime=runtime,
     ))
     check("error=decision_mismatch", events[0].get("code") == "decision_mismatch", str(events[0]))
     check("done=interrupted", events[-1].get("status") == "interrupted")
@@ -243,6 +270,10 @@ async def main() -> None:
     from furina_desktop.agent.state import SupervisorState
     check("SupervisorState.mode has default", SupervisorState.model_fields["mode"].default == "code",
           str(SupervisorState.model_fields["mode"].default))
+
+    from furina_desktop.agent.runtime import set_runtime
+    set_runtime(None)
+    await engine.dispose()
 
     ok = sum(1 for _, o in _results if o)
     print(f"\n{ok}/{len(_results)} passed")

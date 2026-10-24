@@ -25,6 +25,7 @@
 """
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
@@ -32,6 +33,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
 from furina_desktop.agent.contracts import ReviewDecision
+from furina_desktop.agent.runtime import AgentRuntime, RunContext
 from furina_desktop.api.contracts import AgentRequest
 
 logger = logging.getLogger(__name__)
@@ -54,8 +56,9 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-def _config(chat_thread_id: Any) -> dict:
-    return {"configurable": {"thread_id": str(chat_thread_id)}}
+def _config(graph_thread_id: Any) -> dict:
+    """T23：图现场键一律用 `execution.graph_thread_id`，不再用业务会话 id。"""
+    return {"configurable": {"thread_id": str(graph_thread_id)}}
 
 
 def _agent_of(namespace: tuple[str, ...]) -> str:
@@ -100,7 +103,25 @@ def check_decision_matches(decision: ReviewDecision, pending: list[str]) -> None
         )
 
 
-async def _stream_graph(*, graph: CompiledStateGraph, graph_input: Any, config: dict) -> AsyncIterator[str]:
+async def _notify_finished(
+    callback: Callable[[str], Awaitable[None]] | None, status: str
+) -> None:
+    """收尾回调：数据库失败不能把已经跑完的图变成断流。"""
+    if callback is None:
+        return
+    try:
+        await callback(status)
+    except Exception:  # noqa: BLE001 —— 收尾失败只记录，不影响 SSE
+        logger.exception("运行收尾失败：status=%s", status)
+
+
+async def _stream_graph(
+    *,
+    graph: CompiledStateGraph,
+    graph_input: Any,
+    config: dict,
+    on_finished: Callable[[str], Awaitable[None]] | None = None,
+) -> AsyncIterator[str]:
     """把一次图运行（首次或 resume）翻译成 SSE 帧。两条入口共用这一份分派逻辑。"""
     seen_interrupts: set[str] = set()
     started_tools: set[str] = set()
@@ -171,16 +192,16 @@ async def _stream_graph(*, graph: CompiledStateGraph, graph_input: Any, config: 
 
     except Exception as exc:  # noqa: BLE001 —— 错误必须以终态事件送达，而不是断流
         logger.exception("图运行失败")
+        await _notify_finished(on_finished, "failed")
         yield _sse({"type": "error", "code": "graph_error", "message": str(exc)})
         yield _sse({"type": "done", "status": "failed"})
         return
 
     # 正常返回有两种语义：跑完了 / 停在中断。只能问 checkpointer。
     snapshot = await graph.aget_state(config)
-    if snapshot.interrupts:
-        yield _sse({"type": "done", "status": "interrupted"})
-    else:
-        yield _sse({"type": "done", "status": "completed"})
+    status = "interrupted" if snapshot.interrupts else "completed"
+    await _notify_finished(on_finished, status)
+    yield _sse({"type": "done", "status": status})
 
 
 def _interrupt_frames(interrupts, agent: str, seen: set[str]):
@@ -199,9 +220,23 @@ def _interrupt_frames(interrupts, agent: str, seen: set[str]):
         })
 
 
-async def agent_stream(*, inform: AgentRequest, graph: CompiledStateGraph) -> AsyncIterator[str]:
-    """首次对话入口：用户输入 → 图 → SSE 帧。"""
-    config = _config(inform.chat_thread_id)
+async def agent_stream(
+    *,
+    inform: AgentRequest,
+    graph: CompiledStateGraph,
+    run: RunContext,
+    runtime: AgentRuntime | None = None,
+) -> AsyncIterator[str]:
+    """首次对话入口：用户输入 → 图 → SSE 帧。
+
+    T23：Task/Execution 已由 `/agent` 创建；这里只负责用 `run.graph_thread_id`
+    作为图现场键，并在运行结束时收尾。
+    """
+    config = _config(run.graph_thread_id)
+
+    async def _on_finished(status: str) -> None:
+        if runtime is not None:
+            await runtime.finalize_run(run.execution_id, status=status)
 
     # ── AI 改动：挂起期间又发新消息的兜底。 ──
     # TODO Q2 还没拍板（409 vs 作废旧 pending），这里选**最保守**的一种：
@@ -225,16 +260,26 @@ async def agent_stream(*, inform: AgentRequest, graph: CompiledStateGraph) -> As
         "messages": [{"role": "user", "content": inform.user_input}],
         "mode": "code",
         "subagent_task": inform.user_input,
+        "task_id": str(run.task_id),
+        "execution_id": str(run.execution_id),
     }
-    async for frame in _stream_graph(graph=graph, graph_input=graph_input, config=config):
+    async for frame in _stream_graph(
+        graph=graph,
+        graph_input=graph_input,
+        config=config,
+        on_finished=_on_finished,
+    ):
         yield frame
 
 
 async def agent_resume_stream(
     *,
     graph: CompiledStateGraph,
-    chat_thread_id: Any,
+    graph_thread_id: Any,
     decision: ReviewDecision,
+    execution_id: Any | None = None,
+    runtime: AgentRuntime | None = None,
+    approval_ids: list | None = None,
 ) -> AsyncIterator[str]:
     """审批恢复入口：ReviewDecision → Command(resume=) → SSE 帧。
 
@@ -242,7 +287,17 @@ async def agent_resume_stream(
     # 复核重点：路由层已经挡过一遍 409，这里再挡一次是为了**直接调用本函数**的
     # 测试/内部代码也不会把非法决定塞进图。两处判据必须保持一致。
     """
-    config = _config(chat_thread_id)
+    config = _config(graph_thread_id)
+
+    async def _on_finished(status: str) -> None:
+        if runtime is None or execution_id is None:
+            return
+        if status == "failed":
+            await runtime.handle_resume_failure(
+                execution_id, approval_ids=approval_ids
+            )
+        else:
+            await runtime.finalize_run(execution_id, status=status)
     pending = await get_pending_tool_call_ids(graph=graph, config=config)
 
     if not pending:
@@ -261,10 +316,14 @@ async def agent_resume_stream(
         yield _sse({"type": "done", "status": "interrupted"})
         return
 
+    # T23-4：T22 校验与 T19 迁移由 API 在调用本函数前完成；
+    # 这里只假设状态已经允许恢复，直接驱动图。
+
     # model_dump(mode="json")：ReviewAction 是 str 枚举，落盘/传输都要纯字符串
     async for frame in _stream_graph(
         graph=graph,
         graph_input=Command(resume=decision.model_dump(mode="json")),
         config=config,
+        on_finished=_on_finished,
     ):
         yield frame

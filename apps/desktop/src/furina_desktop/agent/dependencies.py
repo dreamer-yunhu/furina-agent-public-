@@ -257,20 +257,26 @@ async def handle_review_fn(*,decision:ReviewDecision,
     missing = [tid for tid in sent_ids if tid not in decided]
     if missing:
         return Command(
-            update={"coder_messages": [
-                await build_tool_messages(tc, content="审批结果不完整，请重新审批！")
-                for tc in raw_tool_calls
-            ]},
+            update={
+                "coder_messages": [
+                    await build_tool_messages(tc, content="审批结果不完整，请重新审批！")
+                    for tc in raw_tool_calls
+                ],
+                "approved_approvals": None,
+            },
             goto="model_node",
         )
     # 合法性：不能对没有送审的调用做决定（防伪造/串批）
     extra = [tid for tid in decided if tid not in sent_ids]
     if extra:
         return Command(
-            update={"coder_messages": [
-                await build_tool_messages(tc, content="审批结果包含未知的调用，已阻止执行！")
-                for tc in raw_tool_calls
-            ]},
+            update={
+                "coder_messages": [
+                    await build_tool_messages(tc, content="审批结果包含未知的调用，已阻止执行！")
+                    for tc in raw_tool_calls
+                ],
+                "approved_approvals": None,
+            },
             goto="model_node",
         )
 
@@ -295,6 +301,7 @@ async def handle_review_fn(*,decision:ReviewDecision,
                 "coder_messages": msg,
                 "pending_reviews": None,
                 "decision_reviews": None,
+                "approved_approvals": None,
             },
             goto="model_node",
         )
@@ -321,13 +328,43 @@ async def handle_review_fn(*,decision:ReviewDecision,
                 ],
                 "pending_reviews": None,
                 "decision_reviews": None,
+                "approved_approvals": None,
             },
             goto="model_node",
         )
 
-    # 全批准：清除快照，避免下一次轮次复用旧审批
+    # 全批准：清除快照，记录本批 approval_id ↔ tool_call_id 供执行认领
+    missing_approval = [
+        item.tool_call_id for item in snapshot.requests if not item.approval_id
+    ]
+    if missing_approval:
+        # T23：没有数据库审批 id 就不能进入执行（旧 checkpoint 也不放行）
+        return Command(
+            update={
+                "coder_messages": [
+                    await build_tool_messages(
+                        tc,
+                        content=f"审批缺少持久化 id，已阻止执行：{missing_approval}",
+                    )
+                    for tc in raw_tool_calls
+                ],
+                "pending_reviews": None,
+                "decision_reviews": None,
+                "approved_approvals": None,
+            },
+            goto="model_node",
+        )
+
+    approved = [
+        {"approval_id": item.approval_id, "tool_call_id": item.tool_call_id}
+        for item in snapshot.requests
+    ]
     return Command(
-        update={"pending_reviews": None, "decision_reviews": None},
+        update={
+            "pending_reviews": None,
+            "decision_reviews": None,
+            "approved_approvals": approved or None,
+        },
         goto="tools_node",
     )
 

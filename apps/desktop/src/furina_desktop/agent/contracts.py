@@ -49,6 +49,8 @@ class WritePreview(BaseModel):
     """送审的单个写操作预览。"""
 
     tool_call_id: str  # 工具调用id
+    # ── T23：数据库审批行 id；旧 checkpoint 兼容为 None ──
+    approval_id: str | None = None
     path: str  # 沙箱相对，不给绝对路径
     # ── AI 新增（T34）──
     # 写工具现在会自动建父目录，但"会建哪些"必须让审批人看见，
@@ -74,6 +76,8 @@ class ItemDecision(BaseModel):
     """对单个 `WritePreview` 的裁决。"""
 
     tool_call_id: str  # 关联回 WritePreview
+    # ── T23：决定回指数据库行；T23-3 才强制要求 ──
+    approval_id: str | None = None
     action: ReviewAction
     # <- AI 改动：补默认值 None。
     #    Pydantic v2 里 `str | None` 不带默认值仍然是**必填**，前端批准时通常

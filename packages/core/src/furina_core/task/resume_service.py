@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -127,12 +128,25 @@ async def validate_and_resume(
     execution_id: uuid.UUID,
     now: datetime | None = None,
     workspace_root: str | Path | None = None,
+    approval_ids: Sequence[uuid.UUID] | None = None,
+    allow_rejected: bool = False,
 ) -> ResumeResult:
     """校验并恢复。成功返回 `RESUMED`，失败不改变任何状态。
 
     `now` 预留给调用方记录/上层策略；**deadline 不是拒绝条件**（C10）。
+
+    `approval_ids`：只校验当前中断批次（T23-4）。`None` = 校验整个 Execution，
+    保持旧调用行为不变。
+    `allow_rejected`：拒绝恢复模式。要求无 PENDING、无已开始、至少一条
+    `REJECTED`；允许同批存在 `APPROVED + NOT_STARTED`。
     """
     _ = now  # 迟到决定允许恢复；当前不参与判断
+
+    scope: list[uuid.UUID] | None = None
+    if approval_ids is not None:
+        scope = list(dict.fromkeys(approval_ids))
+        if not scope:
+            return _failure(ResumeOutcome.NOT_FOUND, ValidationFailureCode.APPROVAL_MISMATCH)
 
     task = await session.get(AgentTask, task_id)
     execution = await session.get(AgentExecution, execution_id)
@@ -147,26 +161,44 @@ async def validate_and_resume(
     if state_pair not in _RECOVERABLE_STATES:
         return _failure(ResumeOutcome.ILLEGAL_STATE, ValidationFailureCode.TASK_INVALID)
 
-    approvals = (
-        await session.execute(
-            select(ApprovalRequest).where(ApprovalRequest.execution_id == execution_id)
-        )
-    ).scalars().all()
+    stmt = select(ApprovalRequest).where(ApprovalRequest.execution_id == execution_id)
+    if scope is not None:
+        stmt = stmt.where(ApprovalRequest.id.in_(scope))
+    approvals = (await session.execute(stmt)).scalars().all()
     if not approvals:
         return _failure(ResumeOutcome.NOT_FOUND, ValidationFailureCode.APPROVAL_MISMATCH)
+    if scope is not None and len(approvals) != len(scope):
+        # 请求里包含不属于该 Execution 的审批 id
+        return _failure(
+            ResumeOutcome.NOT_FOUND, ValidationFailureCode.APPROVAL_MISMATCH
+        )
 
     if any(item.approval_status == ApprovalStatus.PENDING.value for item in approvals):
         return _failure(
             ResumeOutcome.PENDING_APPROVALS, ValidationFailureCode.APPROVAL_MISMATCH
         )
-    if any(item.approval_status in _TERMINAL_APPROVAL for item in approvals):
-        return _failure(
-            ResumeOutcome.NOT_APPROVED, ValidationFailureCode.APPROVAL_MISMATCH
-        )
-    if any(item.approval_status != ApprovalStatus.APPROVED.value for item in approvals):
-        return _failure(
-            ResumeOutcome.NOT_APPROVED, ValidationFailureCode.APPROVAL_MISMATCH
-        )
+
+    if allow_rejected:
+        # 拒绝恢复：至少一条 REJECTED；REVOKED 仍视为不可恢复
+        if any(item.approval_status == ApprovalStatus.REVOKED.value for item in approvals):
+            return _failure(
+                ResumeOutcome.NOT_APPROVED, ValidationFailureCode.APPROVAL_MISMATCH
+            )
+        if not any(
+            item.approval_status == ApprovalStatus.REJECTED.value for item in approvals
+        ):
+            return _failure(
+                ResumeOutcome.NOT_APPROVED, ValidationFailureCode.APPROVAL_MISMATCH
+            )
+    else:
+        if any(item.approval_status in _TERMINAL_APPROVAL for item in approvals):
+            return _failure(
+                ResumeOutcome.NOT_APPROVED, ValidationFailureCode.APPROVAL_MISMATCH
+            )
+        if any(item.approval_status != ApprovalStatus.APPROVED.value for item in approvals):
+            return _failure(
+                ResumeOutcome.NOT_APPROVED, ValidationFailureCode.APPROVAL_MISMATCH
+            )
 
     if any(
         item.tool_execution_status != ToolExecutionStatus.NOT_STARTED.value
@@ -182,13 +214,16 @@ async def validate_and_resume(
                 ResumeOutcome.ARGS_MISMATCH, ValidationFailureCode.ARGS_MISMATCH
             )
 
-    jail = PathJail(workspace_root or settings.sandbox_root)
-    for item in approvals:
-        outcome = await _validate_target_file(item, jail)
-        if outcome is ResumeOutcome.ILLEGAL_STATE:
-            return _failure(outcome, ValidationFailureCode.TASK_INVALID)
-        if outcome is ResumeOutcome.OLD_HASH_MISMATCH:
-            return _failure(outcome, ValidationFailureCode.OLD_HASH_MISMATCH)
+    # 拒绝恢复时整批都不执行，目标文件是否变化不影响“不执行”的决定；
+    # 但仍校验 args 快照，确保审批行与图中断是同一批请求。
+    if not allow_rejected:
+        jail = PathJail(workspace_root or settings.sandbox_root)
+        for item in approvals:
+            outcome = await _validate_target_file(item, jail)
+            if outcome is ResumeOutcome.ILLEGAL_STATE:
+                return _failure(outcome, ValidationFailureCode.TASK_INVALID)
+            if outcome is ResumeOutcome.OLD_HASH_MISMATCH:
+                return _failure(outcome, ValidationFailureCode.OLD_HASH_MISMATCH)
 
     task_from = TaskStatus(task.status)
     execution_from = ExecutionStatus(execution.status)

@@ -67,6 +67,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from furina_core.config import settings
+from furina_desktop.agent.runtime import AgentRuntime, set_runtime
 from furina_desktop.agent.tools.path_jail import ensure_sandbox_root
 from furina_desktop.api import agent
 from furina_desktop.storage.lifespan import (
@@ -209,6 +210,19 @@ async def lifespan(app: FastAPI):
         logger.critical("业务数据库初始化失败，拒绝启动：%s", exc)
         raise
 
+    # ①.5 运行时适配层（T23）：审批落库与执行生命周期。
+    # 放在业务库之后、图之前：节点执行时通过 provider 取它。
+    app.state.agent_runtime = AgentRuntime(
+        app.state.async_session,
+        workspace_root=settings.sandbox_root,
+        approval_timeout_seconds=settings.approval_timeout_seconds,
+    )
+    set_runtime(app.state.agent_runtime)
+    logger.info(
+        "运行时适配层就绪：approval_timeout=%ss",
+        app.state.agent_runtime.approval_timeout_seconds,
+    )
+
     # ② checkpoint 存储
     try:
         await init_checkpoint_store(app)
@@ -250,6 +264,8 @@ async def lifespan(app: FastAPI):
     # 关闭顺序与初始化相反：先停后台任务，再关存储
     await stop_timeout_scanner(app)
     await close_checkpoint_store(app)
+    set_runtime(None)
+    app.state.agent_runtime = None
     await close_db(app)
     logger.info("已安全关闭")
 

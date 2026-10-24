@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import uuid
 from pathlib import Path
@@ -130,6 +131,30 @@ def main() -> None:
         approval = next(e for e in events if e["type"] == "approval_required")
         check("approval has interrupt_id", bool(approval["interrupt_id"]))
 
+        # T23：图中断必须对应真实的审批行与 WAITING_APPROVAL 状态。
+        con = sqlite3.connect(workdir / "data" / "furina.db")
+        rows = con.execute(
+            "SELECT id, tool_call_id, approval_status, tool_execution_status "
+            "FROM approval_request"
+        ).fetchall()
+        statuses = con.execute(
+            "SELECT t.status, e.status FROM agent_task t "
+            "JOIN agent_execution e ON e.task_id = t.id"
+        ).fetchall()
+        con.close()
+        check("DB has one approval row", len(rows) == 1, str(rows))
+        check("approval bound to tool_call_id", rows and rows[0][1] == "call_w1", str(rows))
+        check("approval PENDING", rows and rows[0][2] == "PENDING", str(rows))
+        check("tool NOT_STARTED", rows and rows[0][3] == "NOT_STARTED", str(rows))
+        req0 = (approval.get("review") or {}).get("requests", [{}])[0]
+        same_id = bool(rows and req0.get("approval_id")) and (
+            uuid.UUID(req0["approval_id"]) == uuid.UUID(str(rows[0][0]))
+        )
+        check("payload approval_id = DB id", same_id,
+              f"{req0.get('approval_id')} / {rows[0][0] if rows else None}")
+        check("task/execution WAITING_APPROVAL",
+              statuses == [("WAITING_APPROVAL", "WAITING_APPROVAL")], str(statuses))
+
         print("\n=== 2. mismatched decision → 409 ===")
         r = client.post("/agent/resume", json={
             "chat_thread_id": thread_id,
@@ -167,6 +192,20 @@ def main() -> None:
         check("file written", (box / "out.txt").is_file())
         check("file content correct",
               (box / "out.txt").read_text(encoding="utf-8") == "approved!")
+        con = sqlite3.connect(workdir / "data" / "furina.db")
+        final = con.execute(
+            "SELECT t.status, e.status FROM agent_task t "
+            "JOIN agent_execution e ON e.task_id = t.id"
+        ).fetchall()
+        decided = con.execute(
+            "SELECT approval_status, decided_by, decided_at FROM approval_request"
+        ).fetchall()
+        con.close()
+        check("task/execution COMPLETED after resume",
+              final == [("COMPLETED", "COMPLETED")], str(final))
+        check("approval APPROVED after resume",
+              len(decided) == 1 and decided[0][0] == "APPROVED" and bool(decided[0][1]) and bool(decided[0][2]),
+              str(decided))
 
         print("\n=== 6. replaying the same approval → 409 ===")
         r = client.post("/agent/resume", json={

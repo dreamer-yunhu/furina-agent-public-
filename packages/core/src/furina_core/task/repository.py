@@ -351,6 +351,38 @@ async def claim_tool_execution(
     return result.rowcount == 1
 
 
+# ── AI 新增（T23-4）：整批原子认领 ──
+# 复核重点：
+#   1. 单条 UPDATE + rowcount 校验：任一审批不满足条件 → 整批回滚，不执行任何工具。
+#   2. 调用方必须传入当前中断批次，不允许把历史审批混进来。
+async def claim_tool_executions(
+    session: AsyncSession, *, approval_ids: Sequence[uuid.UUID]
+) -> bool:
+    """`APPROVED + NOT_STARTED → RUNNING`，整批成功才提交。"""
+    unique_ids = list(dict.fromkeys(approval_ids))
+    if not unique_ids:
+        return False
+    result = await session.execute(
+        update(ApprovalRequest)
+        .where(
+            ApprovalRequest.id.in_(unique_ids),
+            ApprovalRequest.approval_status == ApprovalStatus.APPROVED.value,
+            ApprovalRequest.tool_execution_status
+            == ToolExecutionStatus.NOT_STARTED.value,
+        )
+        .values(
+            tool_execution_status=ToolExecutionStatus.RUNNING.value,
+            execution_started_at=_now(),
+            updated_at=_now(),
+        )
+    )
+    if result.rowcount != len(unique_ids):
+        await session.rollback()
+        return False
+    await session.commit()
+    return True
+
+
 async def finish_tool_execution(
     session: AsyncSession,
     *,

@@ -102,6 +102,13 @@ class CommonSettings:
             os.getenv("APPROVAL_SCAN_BATCH_SIZE", "50")
         )
 
+        # ---- 审批有效期（T23）----
+        # 审批创建时写入 deadline_at；超时扫描据此把 Task/Execution 置 SUSPENDED。
+        # 迟到决定仍允许恢复（T22 C10），deadline 不是拒绝条件。
+        self.approval_timeout_seconds: int = int(
+            os.getenv("APPROVAL_TIMEOUT_SECONDS", "3600")
+        )
+
         # ---- 日志 ----
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO")
         # 相对路径按"工作目录"解析，别写进源码树

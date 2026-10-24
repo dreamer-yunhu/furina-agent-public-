@@ -144,6 +144,14 @@ async def run(factory, task_id, execution_id):
             workspace_root=SANDBOX)
 
 
+async def run_scope(factory, task_id, execution_id, approval_ids, *, allow_rejected=False):
+    async with factory() as s:
+        return await validate_and_resume(
+            s, task_id=task_id, execution_id=execution_id,
+            workspace_root=SANDBOX, approval_ids=approval_ids,
+            allow_rejected=allow_rejected)
+
+
 async def main() -> None:
     if DB.parent.exists():
         shutil.rmtree(DB.parent, ignore_errors=True)
@@ -351,6 +359,85 @@ async def main() -> None:
     check("both rolled back",
           await states(factory, t, e) == (TaskStatus.WAITING_APPROVAL.value,
                                           ExecutionStatus.WAITING_APPROVAL.value))
+
+    # ---------------------------------------------------------------- 19
+    print("\n=== 19. 批次范围：旧批已执行，不阻断新批 ===")
+    t, e = await make_case(factory, thread_id)
+    old = await add_approval(factory, t, e, status=ApprovalStatus.APPROVED,
+                             target_path=None, started=True)
+    new = await add_approval(factory, t, e, status=ApprovalStatus.APPROVED,
+                             target_path=None)
+    full = await run(factory, t, e)
+    check("without scope ALREADY_EXECUTED",
+          full.outcome is ResumeOutcome.ALREADY_EXECUTED, full.outcome.value)
+    scoped = await run_scope(factory, t, e, [new])
+    check("scoped batch RESUMED", scoped.outcome is ResumeOutcome.RESUMED,
+          scoped.outcome.value)
+    old_row = await approval_row(factory, old)
+    check("scope leaves old untouched", old_row.tool_execution_status == "RUNNING",
+          old_row.tool_execution_status)
+
+    # ---------------------------------------------------------------- 20
+    print("\n=== 20. 请求了不属于该 Execution 的审批 id ===")
+    t, e = await make_case(factory, thread_id)
+    await add_approval(factory, t, e, status=ApprovalStatus.APPROVED, target_path=None)
+    missing = await run_scope(factory, t, e, [uuid.uuid4()])
+    check("NOT_FOUND", missing.outcome is ResumeOutcome.NOT_FOUND, missing.outcome.value)
+    check("state unchanged",
+          await states(factory, t, e) == (TaskStatus.WAITING_APPROVAL.value,
+                                          ExecutionStatus.WAITING_APPROVAL.value))
+
+    # ---------------------------------------------------------------- 21
+    print("\n=== 21. 拒绝模式：REJECTED + APPROVED 同批可恢复 ===")
+    t, e = await make_case(factory, thread_id)
+    a_ok = await add_approval(factory, t, e, status=ApprovalStatus.APPROVED, target_path=None)
+    a_no = await add_approval(factory, t, e, status=ApprovalStatus.REJECTED, target_path=None)
+    rejected = await run_scope(factory, t, e, [a_ok, a_no], allow_rejected=True)
+    check("rejection RESUMED", rejected.outcome is ResumeOutcome.RESUMED,
+          rejected.outcome.value)
+    check("RUNNING after rejection resume",
+          await states(factory, t, e) == (TaskStatus.RUNNING.value,
+                                          ExecutionStatus.RUNNING.value))
+
+    # ---------------------------------------------------------------- 22
+    print("\n=== 22. 拒绝模式要求至少一条 REJECTED ===")
+    t, e = await make_case(factory, thread_id)
+    only_ok = await add_approval(factory, t, e, status=ApprovalStatus.APPROVED, target_path=None)
+    not_rejected = await run_scope(factory, t, e, [only_ok], allow_rejected=True)
+    check("NOT_APPROVED", not_rejected.outcome is ResumeOutcome.NOT_APPROVED,
+          not_rejected.outcome.value)
+    check("state unchanged",
+          await states(factory, t, e) == (TaskStatus.WAITING_APPROVAL.value,
+                                          ExecutionStatus.WAITING_APPROVAL.value))
+
+    # ---------------------------------------------------------------- 23
+    print("\n=== 23. UNKNOWN 结果禁止自动重放 ===")
+    t, e = await make_case(factory, thread_id)
+    unknown = await add_approval(factory, t, e, status=ApprovalStatus.APPROVED,
+                                 target_path=None, started=True)
+    async with factory() as s:
+        from furina_core.task.enums import ToolExecutionStatus
+        await repository.finish_tool_execution(
+            s, approval_id=unknown,
+            status=ToolExecutionStatus.UNKNOWN, error="outcome unknown")
+    blocked = await run_scope(factory, t, e, [unknown])
+    check("ALREADY_EXECUTED on UNKNOWN", blocked.outcome is ResumeOutcome.ALREADY_EXECUTED,
+          blocked.outcome.value)
+
+    # ---------------------------------------------------------------- 24
+    print("\n=== 24. 拒绝模式不受目标文件变化影响 ===")
+    t, e = await make_case(factory, thread_id)
+    (SANDBOX / "r.txt").write_text("original", encoding="utf-8")
+    a_ok = await add_approval(factory, t, e, status=ApprovalStatus.APPROVED,
+                              target_path="r.txt", old_hash=file_hash("original"))
+    a_no = await add_approval(factory, t, e, status=ApprovalStatus.REJECTED,
+                              target_path=None)
+    (SANDBOX / "r.txt").write_text("changed-by-human", encoding="utf-8")
+    rejection = await run_scope(factory, t, e, [a_ok, a_no], allow_rejected=True)
+    check("rejection RESUMED despite file change",
+          rejection.outcome is ResumeOutcome.RESUMED, rejection.outcome.value)
+    check("file not overwritten",
+          (SANDBOX / "r.txt").read_text(encoding="utf-8") == "changed-by-human")
 
     await engine.dispose()
 

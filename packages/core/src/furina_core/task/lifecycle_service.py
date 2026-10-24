@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -188,14 +189,18 @@ async def suspend_after_resume_failure(
     task_id: uuid.UUID,
     execution_id: uuid.UUID,
     reason: SuspendReason = SuspendReason.RESUME_FAILED,
+    approval_ids: Sequence[uuid.UUID] | None = None,
 ) -> tuple[TransitionOutcome, TransitionOutcome]:
     """DB 已 RUNNING、图恢复失败时，把任务安全地退回 SUSPENDED。
 
     硬前置（任一不满足即拒绝，不落库）：
       1. Task/Execution 都存在且归属一致
       2. 两者当前都是 RUNNING
-      3. 该 Execution 下所有审批的 `tool_execution_status == NOT_STARTED`
+      3. **当前审批批次**的 `tool_execution_status == NOT_STARTED`
          （任一已开始/结果未知 → 不可安全重试，应改走 FAILED）
+
+    `approval_ids`：只检查本批（T23-4 多批审批）。`None` = 检查整个 Execution，
+    保持旧调用行为不变。
 
     ⚠️ 本函数会先做只读校验，然后 `rollback()` 结束只读事务，
        再交给 `transition_pair` 自己开事务。调用方不要在同一 Session 上
@@ -218,11 +223,18 @@ async def suspend_after_resume_failure(
     ):
         return TransitionOutcome.CONFLICT, TransitionOutcome.CONFLICT
 
-    approvals = (
-        await session.execute(
-            select(ApprovalRequest).where(ApprovalRequest.execution_id == execution_id)
-        )
-    ).scalars().all()
+    stmt = select(ApprovalRequest).where(
+        ApprovalRequest.execution_id == execution_id
+    )
+    scope: list[uuid.UUID] | None = None
+    if approval_ids is not None:
+        scope = list(dict.fromkeys(approval_ids))
+        if not scope:
+            return TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT
+        stmt = stmt.where(ApprovalRequest.id.in_(scope))
+    approvals = (await session.execute(stmt)).scalars().all()
+    if scope is not None and len(approvals) != len(scope):
+        return TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT
     if any(
         item.tool_execution_status != ToolExecutionStatus.NOT_STARTED.value
         for item in approvals
