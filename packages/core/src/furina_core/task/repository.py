@@ -34,6 +34,12 @@ from furina_core.task.enums import (
     TaskStatus,
     ToolExecutionStatus,
 )
+# <- AI 改动（T19）：repository 承担“配对合法性”的静态校验（Q4=A），
+#    业务时机/存在性/归属仍归 Service。
+from furina_core.task.lifecycle import (
+    is_legal_execution_transition,
+    is_legal_task_transition,
+)
 from furina_core.task.models import AgentExecution, AgentTask, ApprovalRequest
 
 
@@ -91,8 +97,17 @@ async def transition_task(
     from_status: TaskStatus,
     to_status: TaskStatus,
     failure_reason: str | None = None,
+    commit: bool = True,
 ) -> bool:
-    """条件状态迁移。返回 True 表示本次抢到了迁移。"""
+    """条件状态迁移。返回 True 表示本次抢到了迁移。
+
+    `commit=False` 供 Service 把 Task/Execution 放进同一个事务（T19 Q3=A）；
+    默认 True 保持既有调用行为不变。
+    """
+    # <- AI 改动（T19）：非法配对直接拒绝，不落库。返回 False 与“条件未命中”同形，
+    #    调用方若需要区分原因，应走 lifecycle_service（返回 TransitionOutcome）。
+    if not is_legal_task_transition(from_status, to_status):
+        return False
     values: dict = {"status": to_status.value, "updated_at": _now()}
     if failure_reason is not None:
         values["failure_reason"] = failure_reason
@@ -101,7 +116,8 @@ async def transition_task(
         .where(AgentTask.id == task_id, AgentTask.status == from_status.value)
         .values(**values)
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return result.rowcount == 1
 
 
@@ -154,7 +170,12 @@ async def transition_execution(
     to_status: ExecutionStatus,
     validation_failure_reason: str | None = None,
     finished: bool = False,
+    commit: bool = True,
 ) -> bool:
+    """条件状态迁移。`commit=False` 供 Service 组合事务（T19 Q3=A）。"""
+    # <- AI 改动（T19）：与 transition_task 同一口径，非法配对直接拒绝。
+    if not is_legal_execution_transition(from_status, to_status):
+        return False
     values: dict = {"status": to_status.value}
     if validation_failure_reason is not None:
         values["validation_failure_reason"] = validation_failure_reason
@@ -168,7 +189,8 @@ async def transition_execution(
         )
         .values(**values)
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return result.rowcount == 1
 
 
