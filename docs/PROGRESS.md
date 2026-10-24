@@ -139,6 +139,19 @@
 - 实测：`smoke_lifecycle.py` 55/55；`smoke_task_models.py` 21/21；`smoke_approval_service.py` 33/33；全量 11 套全绿。
 - 未验证：跨进程并发、PostgreSQL 行为。
 
+### 2026-10-24（续四）· T21 审批超时扫描与挂起
+- T21-0 审计 + T21-1 ADR（`docs/audit/`），Q1–Q11 全部按建议确认。
+- `task/timeout_scanner.py`：`scan_once` / `ScanReport` / `on_suspended` 钩子；
+  逐条两段会话（只读校验 → `transition_pair` 同事务迁移）。
+- `repository.list_due_pending_approvals`：PENDING + 到期 + **排除两边都已 SUSPENDED 的对**。
+  实施时发现：审批超时后仍是 PENDING，不排除会导致有 limit 的扫描饥饿。
+- desktop `services/timeout_scanner.py`：lifespan 后台循环、首轮延迟、异常不退出、
+  非法配置 clamp + ERROR、`interval=0` 关闭；`/healthz` 暴露 `timeout_scanner`。
+- 配置：`APPROVAL_SCAN_INTERVAL_SECONDS`（默认 30）/ `APPROVAL_SCAN_BATCH_SIZE`（默认 50）。
+- 实测：`smoke_timeout_scanner.py` 46/46；全量 12 套全绿；lifespan 实测
+  `interval=1 → running`、`interval=-5 → disabled`。
+- 未验证：跨进程、PostgreSQL、运行时接线（T23）。
+
 ### 2026-10-23 · 删除旧单体 + 文档合并
 - 删除 `backend/`（60 个跟踪文件）；未跟踪语料 32 文件迁至 `knowledge/`；实验脚本归档 `scripts/experiments/`。
 - 实测：`import furina_desktop.main` → **IMPORT OK**。
@@ -156,6 +169,7 @@
 | `apps/desktop/tests/smoke_coder_isolation.py` | ✅ 7/7 | 2026-10-24 |
 | `apps/desktop/tests/smoke_approval_service.py` | ✅ 33/33 | 2026-10-24 |
 | `apps/desktop/tests/smoke_lifecycle.py` | ✅ 55/55 | 2026-10-24 |
+| `apps/desktop/tests/smoke_timeout_scanner.py` | ✅ 46/46 | 2026-10-24 |
 | `apps/desktop/tests/smoke_tool_safety.py` | ✅ 25/25 | 2026-10-24 |
 | 真模型端到端（DeepSeek，含跨版本恢复） | ✅ | 2026-10-24 |
 | `apps/desktop/tests/smoke_http_resume.py` | ✅ 16/16 | 2026-10-24 |
@@ -262,6 +276,12 @@ cd C:\furina-agent
 | `task/repository.py` | 两个 `transition_*` 加 `commit` + 静态合法性 | 返回 False 同时代表“非法配对”与“CAS 未命中”，需要区分请走 service |
 | `apps/desktop/tests/smoke_lifecycle.py` | 新建 T19 测试 | 并发=同进程两 Session；失败注入用 monkeypatch |
 | `docs/WHITEPAPER.md` | §5.3 状态描述与枚举对齐 | 审批态无 EXPIRED；取消用 REVOKED |
+| `task/timeout_scanner.py` | 新增 T21 扫描核心 | 不改 `approval_status`；回调只在 APPLIED 后调用；单条失败不终止整轮 |
+| `task/repository.py` | 新增 `list_due_pending_approvals` | 必须排除“两边都 SUSPENDED”的对，否则 limit 饥饿 |
+| `services/timeout_scanner.py`（desktop） | 后台循环与启停 | 先 sleep 再扫；非取消异常吞掉并记录；`interval=0` 关闭 |
+| `config.py` | 两个扫描配置项 | 负数/非正批量在桌面端 clamp + ERROR |
+| `main.py` | lifespan 启停 + healthz | 先停扫描器再关存储 |
+| `apps/desktop/tests/smoke_timeout_scanner.py` | 新建 | 用例间需清库，否则到期审批互相污染 |
 
 
 ### 2026-10-23 · 删除旧单体 + 文档合并

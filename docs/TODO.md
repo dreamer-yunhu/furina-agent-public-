@@ -143,7 +143,10 @@
 ### [ ] T20 审批决定 API + 服务端时间
 - **验收**：决定使用服务端时间与 `deadline_at` 比较；过期决定不生效。
 
-### [ ] T21 超时扫描协程
+### [x] T21 超时扫描协程
+> ✅ 2026-10-24：`task/timeout_scanner.py`（scan_once/ScanReport/回调）+ `list_due_pending_approvals` + desktop 后台循环与配置；`smoke_timeout_scanner.py` 46/46。
+> 超时只置 Task/Execution `SUSPENDED`，审批保持 `PENDING`；查询排除已挂起对以防 limit 饥饿。
+> 未验证：跨进程、PostgreSQL、运行时接线（等 T23）。
 - **验收**：超时只把 Task/Execution 置 `SUSPENDED`，**不改审批状态**。
 
 ### [ ] T22 迟到批准 + 恢复前校验
