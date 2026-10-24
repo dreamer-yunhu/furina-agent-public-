@@ -128,11 +128,14 @@
 
 > 设计要点见 WHITEPAPER §5.3 与本节；完整方案可从 git 历史查看（旧文档已清理）。
 
-### [ ] T18 create-or-get 幂等创建
+### [x] T18 create-or-get 幂等创建
+> ✅ 2026-10-24：`furina_core/task/service.py`（`create_or_get_approval` / `canonical_args_json` / `compute_args_hash` / `derive_idempotency_key` / `as_utc` / `ApprovalConflict`）；`smoke_approval_service.py` 33/33，`smoke_task_models.py` 仍 21/21。
+> 已按审计拍板：Q1 键不含 args_hash、Q2 冲突抛错、Q3 UTC 归一化、Q6 服务层跨任务校验；未改 schema 与 repository 接口。
 - **做法**：`SAVEPOINT` + `IntegrityError` + `args_hash` 语义校验。
 - **验收**：同一 `idempotency_key` 并发创建只落一行。
 
 ### [ ] T19 Task / Execution 生命周期服务
+> 📋 准备文档：`docs/audit/2026-10-24-T19-0-准备工作与待拍板.md`（迁移表提案 + 事务边界 + 8 个待拍板问题）
 - **验收**：状态迁移只能按状态机走；非法迁移返回明确错误。
 
 ### [ ] T20 审批决定 API + 服务端时间

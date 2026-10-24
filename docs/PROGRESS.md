@@ -116,6 +116,16 @@
   实测：`smoke_tool_safety.py` 20/20；用不存在的 `SANDBOX_ROOT` 起服务，目录被自动创建且 `/healthz` 正常。
 - T34：`WritePreview` 增加 `creates_dirs`（缺失的祖先目录，由浅到深），`build_write_review` 计算；字段穿过 interrupt/SSE 到达前端。`smoke_tool_safety.py` 25/25、`smoke_stream_bridge.py` 38/38。
 
+### 2026-10-24（续二）· T18 审批服务（幂等创建）
+- 先做 T18-0 只读审计（`docs/audit/2026-10-24-T18-0-审计结论与待拍板.md`），用 5 个探针确认：
+  commit 失败后 session 进入 `PendingRollbackError`、SAVEPOINT 可行、并发同 key 只落一行、
+  `task_id`/`execution_id` 可错配、SQLite 时间读出为 naive 且比较抛 TypeError。
+- 拍板后实施 `packages/core/src/furina_core/task/service.py`：
+  `canonical_args_json` / `compute_args_hash` / `derive_idempotency_key`（不含 args_hash）/
+  `as_utc` / `ApprovalConflict` / `create_or_get_approval`（SAVEPOINT + flush）。
+- 未改 schema、依赖与 repository 提交接口；T19/T20/MCP 均未触碰。
+- 实测：`smoke_approval_service.py` 33/33；`smoke_task_models.py` 21/21；core 86/86；import OK。
+
 ### 2026-10-23 · 删除旧单体 + 文档合并
 - 删除 `backend/`（60 个跟踪文件）；未跟踪语料 32 文件迁至 `knowledge/`；实验脚本归档 `scripts/experiments/`。
 - 实测：`import furina_desktop.main` → **IMPORT OK**。
@@ -131,6 +141,7 @@
 | `apps/desktop/tests/smoke_stream_bridge.py` | ✅ 38/38 | 2026-10-24 |
 | `apps/desktop/tests/smoke_old_hash.py` | ✅ 8/8 | 2026-10-24 |
 | `apps/desktop/tests/smoke_coder_isolation.py` | ✅ 7/7 | 2026-10-24 |
+| `apps/desktop/tests/smoke_approval_service.py` | ✅ 33/33 | 2026-10-24 |
 | `apps/desktop/tests/smoke_tool_safety.py` | ✅ 25/25 | 2026-10-24 |
 | 真模型端到端（DeepSeek，含跨版本恢复） | ✅ | 2026-10-24 |
 | `apps/desktop/tests/smoke_http_resume.py` | ✅ 16/16 | 2026-10-24 |
@@ -230,6 +241,8 @@ cd C:\furina-agent
 | `apps/desktop/tests/smoke_tool_safety.py` | 新建 | 断言的是“模型看到的文本”，不是日志 |
 | `agent/contracts.py` | `WritePreview.creates_dirs`（T34） | 默认空列表；顺序必须由浅到深，别改成 set |
 | `agent/dependencies.py` | `build_write_review` 计算缺失祖先目录 | 只列**尚不存在**的；越界路径在更早的 resolve 已被挡 |
+| `task/service.py` | 新增 T18 审批服务 | ① SAVEPOINT 不能换成 try+commit；② 幂等键不含 args_hash；③ `as_utc` 是所有时间比较的前置 |
+| `apps/desktop/tests/smoke_approval_service.py` | 新建 T18 测试 | 并发用例依赖 SQLite 写锁，换 PG 要重验错误类型 |
 
 
 ### 2026-10-23 · 删除旧单体 + 文档合并
