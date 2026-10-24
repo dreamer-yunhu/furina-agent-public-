@@ -152,6 +152,16 @@
   `interval=1 → running`、`interval=-5 → disabled`。
 - 未验证：跨进程、PostgreSQL、运行时接线（T23）。
 
+### 2026-10-24（续五）· T20 决策服务
+- `task/decision_service.py`：`submit_decision` 落库决定；`DecisionOutcome`
+  （APPLIED / IDEMPOTENT / CONFLICT / NOT_FOUND / SCOPE_MISMATCH / ILLEGAL_STATE）；
+  `DecisionResult` 携带 `approval` 与 `late`。
+- 判定顺序：存在 → 归属 → **已有决定优先于终态任务** → 服务端时间/迟到 → CAS → 失败重读分类。
+- 事务：单行 CAS，不加锁、不加 `commit=False`；数据库异常原样抛出。
+- 不修改 Task/Execution；不接 `/agent/resume`（T23）。
+- 实测：`smoke_decision_service.py` 38/38；全量 13 套全绿。
+- 未验证：PostgreSQL、跨进程并发、运行时接线。
+
 ### 2026-10-23 · 删除旧单体 + 文档合并
 - 删除 `backend/`（60 个跟踪文件）；未跟踪语料 32 文件迁至 `knowledge/`；实验脚本归档 `scripts/experiments/`。
 - 实测：`import furina_desktop.main` → **IMPORT OK**。
@@ -170,6 +180,7 @@
 | `apps/desktop/tests/smoke_approval_service.py` | ✅ 33/33 | 2026-10-24 |
 | `apps/desktop/tests/smoke_lifecycle.py` | ✅ 55/55 | 2026-10-24 |
 | `apps/desktop/tests/smoke_timeout_scanner.py` | ✅ 46/46 | 2026-10-24 |
+| `apps/desktop/tests/smoke_decision_service.py` | ✅ 38/38 | 2026-10-24 |
 | `apps/desktop/tests/smoke_tool_safety.py` | ✅ 25/25 | 2026-10-24 |
 | 真模型端到端（DeepSeek，含跨版本恢复） | ✅ | 2026-10-24 |
 | `apps/desktop/tests/smoke_http_resume.py` | ✅ 16/16 | 2026-10-24 |
@@ -282,6 +293,8 @@ cd C:\furina-agent
 | `config.py` | 两个扫描配置项 | 负数/非正批量在桌面端 clamp + ERROR |
 | `main.py` | lifespan 启停 + healthz | 先停扫描器再关存储 |
 | `apps/desktop/tests/smoke_timeout_scanner.py` | 新建 | 用例间需清库，否则到期审批互相污染 |
+| `task/decision_service.py` | 新增 T20 决策服务 | 已有决定必须排在终态任务校验之前；数据库异常不映射为 outcome |
+| `apps/desktop/tests/smoke_decision_service.py` | 新建 T20 测试 | 并发用例依赖 SQLite 写锁；PG 未验证 |
 
 
 ### 2026-10-23 · 删除旧单体 + 文档合并
