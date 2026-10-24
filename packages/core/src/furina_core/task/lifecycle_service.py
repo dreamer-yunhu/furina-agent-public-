@@ -13,18 +13,25 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from furina_core.task import repository
-from furina_core.task.enums import ExecutionStatus, TaskStatus
+from furina_core.task.enums import ExecutionStatus, TaskStatus, ToolExecutionStatus
 from furina_core.task.lifecycle import (
+    SuspendReason,
     TransitionOutcome,
+    is_guarded_execution_edge,
+    is_guarded_task_edge,
     is_legal_execution_transition,
     is_legal_task_transition,
 )
-from furina_core.task.models import AgentExecution, AgentTask
+from furina_core.task.models import AgentExecution, AgentTask, ApprovalRequest
+
+logger = logging.getLogger(__name__)
 
 _TERMINAL_TASK = {status.value for status in TaskStatus.terminal()}
 
@@ -49,6 +56,9 @@ async def transition_task(
     if task is None:
         return TransitionOutcome.NOT_FOUND
     if not is_legal_task_transition(from_status, to_status):
+        return TransitionOutcome.ILLEGAL
+    # <- AI 改动（T19 变更）：受保护边不允许走单行通用入口
+    if is_guarded_task_edge(from_status, to_status):
         return TransitionOutcome.ILLEGAL
 
     applied = await repository.transition_task(
@@ -80,6 +90,9 @@ async def transition_execution(
         return TransitionOutcome.SCOPE_MISMATCH
     if not is_legal_execution_transition(from_status, to_status):
         return TransitionOutcome.ILLEGAL
+    # <- AI 改动（T19 变更）：受保护边不允许走单行通用入口
+    if is_guarded_execution_edge(from_status, to_status):
+        return TransitionOutcome.ILLEGAL
 
     applied = await repository.transition_execution(
         session,
@@ -105,6 +118,7 @@ async def transition_pair(
     task_to: TaskStatus,
     execution_from: ExecutionStatus,
     execution_to: ExecutionStatus,
+    guarded_ok: bool = False,
 ) -> tuple[TransitionOutcome, TransitionOutcome]:
     """在同一事务里迁移 Task 与 Execution，返回 `(task_outcome, execution_outcome)`。
 
@@ -113,6 +127,7 @@ async def transition_pair(
       · `(NOT_FOUND, CONFLICT)` / `(CONFLICT, NOT_FOUND)` 表示对应实体不存在
       · `(CONFLICT, SCOPE_MISMATCH)` 表示 execution 不属于该 task
       · `(ILLEGAL, CONFLICT)` / `(CONFLICT, ILLEGAL)` 表示对应配对不合法
+      · `guarded_ok=False`（默认）时，受保护边 `RUNNING→SUSPENDED` 一律拒绝
     """
     try:
         async with session.begin():
@@ -129,6 +144,11 @@ async def transition_pair(
                 return TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT
             if not is_legal_execution_transition(execution_from, execution_to):
                 return TransitionOutcome.CONFLICT, TransitionOutcome.ILLEGAL
+            # <- AI 改动（T19 变更）：受保护边必须显式 guarded_ok
+            if not guarded_ok and is_guarded_task_edge(task_from, task_to):
+                return TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT
+            if not guarded_ok and is_guarded_execution_edge(execution_from, execution_to):
+                return TransitionOutcome.CONFLICT, TransitionOutcome.ILLEGAL
 
             # 预检现状：避免“先写一半再回滚”的常规路径（并发仍由 CAS 兜底）
             if task.status != task_from.value or execution.status != execution_from.value:
@@ -140,6 +160,7 @@ async def transition_pair(
                 from_status=task_from,
                 to_status=task_to,
                 commit=False,
+                guarded_ok=guarded_ok,
             )
             execution_applied = await repository.transition_execution(
                 session,
@@ -147,6 +168,7 @@ async def transition_pair(
                 from_status=execution_from,
                 to_status=execution_to,
                 commit=False,
+                guarded_ok=guarded_ok,
             )
             if not (task_applied and execution_applied):
                 # 预检通过但 CAS 失败 = 并发被抢；抛出以回滚另一侧的写入
@@ -155,6 +177,78 @@ async def transition_pair(
         return TransitionOutcome.CONFLICT, TransitionOutcome.CONFLICT
 
     return TransitionOutcome.APPLIED, TransitionOutcome.APPLIED
+
+
+# ----------------------------------------------------------------------
+# 恢复失败后的受保护挂起（T19 变更，Q11=B）
+# ----------------------------------------------------------------------
+async def suspend_after_resume_failure(
+    session: AsyncSession,
+    *,
+    task_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    reason: SuspendReason = SuspendReason.RESUME_FAILED,
+) -> tuple[TransitionOutcome, TransitionOutcome]:
+    """DB 已 RUNNING、图恢复失败时，把任务安全地退回 SUSPENDED。
+
+    硬前置（任一不满足即拒绝，不落库）：
+      1. Task/Execution 都存在且归属一致
+      2. 两者当前都是 RUNNING
+      3. 该 Execution 下所有审批的 `tool_execution_status == NOT_STARTED`
+         （任一已开始/结果未知 → 不可安全重试，应改走 FAILED）
+
+    ⚠️ 本函数会先做只读校验，然后 `rollback()` 结束只读事务，
+       再交给 `transition_pair` 自己开事务。调用方不要在同一 Session 上
+       留有未提交的业务写入。
+    """
+    if reason is not SuspendReason.RESUME_FAILED:
+        raise ValueError(f"专用入口只接受 RESUME_FAILED，收到 {reason!r}")
+
+    task = await session.get(AgentTask, task_id)
+    execution = await session.get(AgentExecution, execution_id)
+    if task is None:
+        return TransitionOutcome.NOT_FOUND, TransitionOutcome.CONFLICT
+    if execution is None:
+        return TransitionOutcome.CONFLICT, TransitionOutcome.NOT_FOUND
+    if execution.task_id != task_id:
+        return TransitionOutcome.CONFLICT, TransitionOutcome.SCOPE_MISMATCH
+    if (
+        task.status != TaskStatus.RUNNING.value
+        or execution.status != ExecutionStatus.RUNNING.value
+    ):
+        return TransitionOutcome.CONFLICT, TransitionOutcome.CONFLICT
+
+    approvals = (
+        await session.execute(
+            select(ApprovalRequest).where(ApprovalRequest.execution_id == execution_id)
+        )
+    ).scalars().all()
+    if any(
+        item.tool_execution_status != ToolExecutionStatus.NOT_STARTED.value
+        for item in approvals
+    ):
+        # 已开始执行或结果未知：不能进入“可重试的挂起”
+        return TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT
+
+    # 结束只读事务，交给 transition_pair 开事务
+    await session.rollback()
+
+    result = await transition_pair(
+        session,
+        task_id=task_id,
+        execution_id=execution_id,
+        task_from=TaskStatus.RUNNING,
+        task_to=TaskStatus.SUSPENDED,
+        execution_from=ExecutionStatus.RUNNING,
+        execution_to=ExecutionStatus.SUSPENDED,
+        guarded_ok=True,
+    )
+    if result == (TransitionOutcome.APPLIED, TransitionOutcome.APPLIED):
+        logger.warning(
+            "图恢复失败，任务已退回 SUSPENDED：task=%s execution=%s reason=%s",
+            task_id, execution_id, reason.value,
+        )
+    return result
 
 
 # ----------------------------------------------------------------------

@@ -16,6 +16,13 @@ from enum import Enum
 from furina_core.task.enums import ExecutionStatus, TaskStatus
 
 
+class SuspendReason(str, Enum):
+    """SUSPENDED 的来源。仅用于返回值/日志（本轮不落库）。"""
+
+    APPROVAL_TIMEOUT = "APPROVAL_TIMEOUT"   # T21：等待审批超时
+    RESUME_FAILED = "RESUME_FAILED"         # T23：DB 已 RUNNING 但图恢复失败
+
+
 class TransitionOutcome(str, Enum):
     """迁移结果。Service 对外统一返回它，调用方不必再猜布尔值的含义。"""
 
@@ -31,6 +38,8 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.QUEUED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
     TaskStatus.RUNNING: frozenset({
         TaskStatus.WAITING_APPROVAL,
+        # <- AI 改动（T19 变更）：受保护边，只能经 suspend_after_resume_failure 使用
+        TaskStatus.SUSPENDED,
         TaskStatus.COMPLETED,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
@@ -59,6 +68,8 @@ EXECUTION_TRANSITIONS: dict[ExecutionStatus, frozenset[ExecutionStatus]] = {
     }),
     ExecutionStatus.RUNNING: frozenset({
         ExecutionStatus.WAITING_APPROVAL,
+        # <- AI 改动（T19 变更）：受保护边，只能经 suspend_after_resume_failure 使用
+        ExecutionStatus.SUSPENDED,
         ExecutionStatus.COMPLETED,
         ExecutionStatus.FAILED,
         ExecutionStatus.VALIDATION_FAILED,
@@ -79,6 +90,29 @@ EXECUTION_TRANSITIONS: dict[ExecutionStatus, frozenset[ExecutionStatus]] = {
     ExecutionStatus.FAILED: frozenset(),
     ExecutionStatus.CANCELLED: frozenset(),
 }
+
+
+# ── AI 新增（T19 变更）：受保护边 ──
+# 复核重点：
+#   1. 这些边在迁移表里是合法的，但**默认 API 必须拒绝**；
+#      只有 suspend_after_resume_failure 在完成前置校验后传 guarded_ok=True 才能用。
+#   2. 加新受保护边时，必须同时更新这里的集合与专用入口的校验。
+GUARDED_TASK_EDGES: frozenset[tuple[TaskStatus, TaskStatus]] = frozenset({
+    (TaskStatus.RUNNING, TaskStatus.SUSPENDED),
+})
+GUARDED_EXECUTION_EDGES: frozenset[tuple[ExecutionStatus, ExecutionStatus]] = frozenset({
+    (ExecutionStatus.RUNNING, ExecutionStatus.SUSPENDED),
+})
+
+
+def is_guarded_task_edge(from_status: TaskStatus, to_status: TaskStatus) -> bool:
+    return (from_status, to_status) in GUARDED_TASK_EDGES
+
+
+def is_guarded_execution_edge(
+    from_status: ExecutionStatus, to_status: ExecutionStatus
+) -> bool:
+    return (from_status, to_status) in GUARDED_EXECUTION_EDGES
 
 
 def is_legal_task_transition(from_status: TaskStatus, to_status: TaskStatus) -> bool:

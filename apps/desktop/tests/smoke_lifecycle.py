@@ -16,7 +16,7 @@ import asyncio
 import shutil
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -30,13 +30,16 @@ from sqlmodel import SQLModel  # noqa: E402
 from furina_core.models import AgentThreadID, User  # noqa: E402
 from furina_core.task import repository  # noqa: E402
 from furina_core.task import lifecycle_service as lsvc  # noqa: E402
-from furina_core.task.enums import ExecutionStatus, TaskStatus  # noqa: E402
+from furina_core.task.enums import ApprovalStatus, ExecutionStatus, TaskStatus  # noqa: E402
 from furina_core.task.lifecycle import (  # noqa: E402
     EXECUTION_TRANSITIONS,
     TASK_TRANSITIONS,
+    SuspendReason,
     TransitionOutcome,
     allowed_execution_targets,
     allowed_task_targets,
+    is_guarded_execution_edge,
+    is_guarded_task_edge,
     is_legal_execution_transition,
     is_legal_task_transition,
 )
@@ -126,6 +129,12 @@ def matrix_section() -> None:
           not [s for s in TaskStatus if is_legal_task_transition(s, s)])
     check("terminals have no exits",
           not [(s, t) for s in TaskStatus.terminal() for t in allowed_task_targets(s)])
+    check("RUNNING->SUSPENDED is legal but guarded",
+          is_legal_task_transition(TaskStatus.RUNNING, TaskStatus.SUSPENDED)
+          and is_guarded_task_edge(TaskStatus.RUNNING, TaskStatus.SUSPENDED))
+    check("Execution RUNNING->SUSPENDED guarded",
+          is_legal_execution_transition(ExecutionStatus.RUNNING, ExecutionStatus.SUSPENDED)
+          and is_guarded_execution_edge(ExecutionStatus.RUNNING, ExecutionStatus.SUSPENDED))
 
     print("\n=== 2. Execution 迁移矩阵（穷举 8×8）===")
     mismatches = [
@@ -402,6 +411,136 @@ async def concurrency_section(factory, thread_id) -> None:
           await task_status(factory, task_id) == TaskStatus.COMPLETED.value)
 
 
+# ----------------------------------------------------------------------
+# 9 T19 变更：受保护的 RUNNING→SUSPENDED
+# ----------------------------------------------------------------------
+async def guarded_section(factory, thread_id) -> None:
+    print("\n=== 9. T19 变更：受保护的 RUNNING→SUSPENDED ===")
+
+    async def make_running(*, started: bool = False):
+        task_id = await make_task(factory, thread_id, TaskStatus.RUNNING)
+        exec_id = await make_execution(factory, task_id, ExecutionStatus.RUNNING)
+        async with factory() as s:
+            approval = await repository.create_approval(
+                s, task_id=task_id, execution_id=exec_id,
+                tool_call_id=f"c-{uuid.uuid4().hex[:6]}",
+                tool_name="write_file_tool", args_json="{}", args_hash="a" * 64,
+                idempotency_key=uuid.uuid4().hex * 2,
+                deadline_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        async with factory() as s:
+            await repository.decide_approval(
+                s, approval_id=approval.id, decision=ApprovalStatus.APPROVED,
+                decided_by="local", decided_at=datetime.now(UTC))
+        if started:
+            async with factory() as s:
+                await repository.claim_tool_execution(s, approval_id=approval.id)
+        return task_id, exec_id, approval.id
+
+    t, e, _ = await make_running()
+    async with factory() as s:
+        generic = await repository.transition_task(
+            s, task_id=t, from_status=TaskStatus.RUNNING,
+            to_status=TaskStatus.SUSPENDED)
+    check("repository rejects guarded edge by default", generic is False)
+    check("state unchanged", await task_status(factory, t) == TaskStatus.RUNNING.value)
+
+    async with factory() as s:
+        allowed = await repository.transition_task(
+            s, task_id=t, from_status=TaskStatus.RUNNING,
+            to_status=TaskStatus.SUSPENDED, guarded_ok=True)
+    check("repository allows with guarded_ok", allowed is True)
+
+    t, e, _ = await make_running()
+    async with factory() as s:
+        out = await lsvc.transition_task(
+            s, task_id=t, from_status=TaskStatus.RUNNING, to_status=TaskStatus.SUSPENDED)
+    check("service single entry returns ILLEGAL", out is TransitionOutcome.ILLEGAL, out.value)
+
+    t, e, _ = await make_running()
+    async with factory() as s:
+        pair = await lsvc.transition_pair(
+            s, task_id=t, execution_id=e,
+            task_from=TaskStatus.RUNNING, task_to=TaskStatus.SUSPENDED,
+            execution_from=ExecutionStatus.RUNNING, execution_to=ExecutionStatus.SUSPENDED)
+    check("transition_pair rejects without guarded_ok",
+          pair == (TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT), str(pair))
+    check("nothing moved",
+          (await task_status(factory, t), await execution_status(factory, e))
+          == (TaskStatus.RUNNING.value, ExecutionStatus.RUNNING.value))
+
+    t, e, _ = await make_running()
+    async with factory() as s:
+        out = await lsvc.suspend_after_resume_failure(
+            s, task_id=t, execution_id=e)
+    check("dedicated entry APPLIED",
+          out == (TransitionOutcome.APPLIED, TransitionOutcome.APPLIED), str(out))
+    check("both SUSPENDED",
+          (await task_status(factory, t), await execution_status(factory, e))
+          == (TaskStatus.SUSPENDED.value, ExecutionStatus.SUSPENDED.value))
+
+    async with factory() as s:
+        again = await lsvc.suspend_after_resume_failure(s, task_id=t, execution_id=e)
+    check("repeat call does not apply",
+          again != (TransitionOutcome.APPLIED, TransitionOutcome.APPLIED), str(again))
+    check("still SUSPENDED",
+          await task_status(factory, t) == TaskStatus.SUSPENDED.value)
+
+    t, e, _ = await make_running(started=True)
+    async with factory() as s:
+        out = await lsvc.suspend_after_resume_failure(s, task_id=t, execution_id=e)
+    check("tool already started -> rejected",
+          out == (TransitionOutcome.ILLEGAL, TransitionOutcome.CONFLICT), str(out))
+    check("states remain RUNNING",
+          (await task_status(factory, t), await execution_status(factory, e))
+          == (TaskStatus.RUNNING.value, ExecutionStatus.RUNNING.value))
+
+    waiting_task = await make_task(factory, thread_id, TaskStatus.WAITING_APPROVAL)
+    waiting_exec = await make_execution(
+        factory, waiting_task, ExecutionStatus.WAITING_APPROVAL)
+    async with factory() as s:
+        out = await lsvc.suspend_after_resume_failure(
+            s, task_id=waiting_task, execution_id=waiting_exec)
+    check("non-RUNNING rejected",
+          out == (TransitionOutcome.CONFLICT, TransitionOutcome.CONFLICT), str(out))
+
+    t, e, _ = await make_running()
+    other_task = await make_task(factory, thread_id, TaskStatus.RUNNING)
+    async with factory() as s:
+        out = await lsvc.suspend_after_resume_failure(
+            s, task_id=other_task, execution_id=e)
+    check("scope mismatch",
+          out == (TransitionOutcome.CONFLICT, TransitionOutcome.SCOPE_MISMATCH), str(out))
+
+    t, e, _ = await make_running()
+    try:
+        async with factory() as s:
+            await lsvc.suspend_after_resume_failure(
+                s, task_id=t, execution_id=e, reason=SuspendReason.APPROVAL_TIMEOUT)
+        check("non-RESUME_FAILED reason rejected", False)
+    except ValueError:
+        check("non-RESUME_FAILED reason rejected", True)
+
+    t, e, _ = await make_running()
+    original_exec = repository.transition_execution
+
+    async def _fail(*args, **kwargs):
+        return False
+
+    repository.transition_execution = _fail
+    try:
+        async with factory() as s:
+            out = await lsvc.suspend_after_resume_failure(
+                s, task_id=t, execution_id=e)
+    finally:
+        repository.transition_execution = original_exec
+    check("pair aborts on second failure",
+          out == (TransitionOutcome.CONFLICT, TransitionOutcome.CONFLICT), str(out))
+    check("both rolled back",
+          (await task_status(factory, t), await execution_status(factory, e))
+          == (TaskStatus.RUNNING.value, ExecutionStatus.RUNNING.value))
+
+
 async def main() -> None:
     if DB.parent.exists():
         shutil.rmtree(DB.parent, ignore_errors=True)
@@ -417,6 +556,7 @@ async def main() -> None:
     await pair_section(factory, thread_id)
     await create_execution_section(factory, thread_id)
     await concurrency_section(factory, thread_id)
+    await guarded_section(factory, thread_id)
 
     await engine.dispose()
 

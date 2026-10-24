@@ -37,6 +37,8 @@ from furina_core.task.enums import (
 # <- AI 改动（T19）：repository 承担“配对合法性”的静态校验（Q4=A），
 #    业务时机/存在性/归属仍归 Service。
 from furina_core.task.lifecycle import (
+    is_guarded_execution_edge,
+    is_guarded_task_edge,
     is_legal_execution_transition,
     is_legal_task_transition,
 )
@@ -98,15 +100,20 @@ async def transition_task(
     to_status: TaskStatus,
     failure_reason: str | None = None,
     commit: bool = True,
+    guarded_ok: bool = False,
 ) -> bool:
     """条件状态迁移。返回 True 表示本次抢到了迁移。
 
     `commit=False` 供 Service 把 Task/Execution 放进同一个事务（T19 Q3=A）；
     默认 True 保持既有调用行为不变。
+    `guarded_ok` 只对受保护边生效（T19 变更：`RUNNING→SUSPENDED`），默认拒绝。
     """
     # <- AI 改动（T19）：非法配对直接拒绝，不落库。返回 False 与“条件未命中”同形，
     #    调用方若需要区分原因，应走 lifecycle_service（返回 TransitionOutcome）。
     if not is_legal_task_transition(from_status, to_status):
+        return False
+    # <- AI 改动（T19 变更）：受保护边必须显式放行
+    if not guarded_ok and is_guarded_task_edge(from_status, to_status):
         return False
     values: dict = {"status": to_status.value, "updated_at": _now()}
     if failure_reason is not None:
@@ -171,10 +178,14 @@ async def transition_execution(
     validation_failure_reason: str | None = None,
     finished: bool = False,
     commit: bool = True,
+    guarded_ok: bool = False,
 ) -> bool:
     """条件状态迁移。`commit=False` 供 Service 组合事务（T19 Q3=A）。"""
     # <- AI 改动（T19）：与 transition_task 同一口径，非法配对直接拒绝。
     if not is_legal_execution_transition(from_status, to_status):
+        return False
+    # <- AI 改动（T19 变更）：受保护边必须显式放行
+    if not guarded_ok and is_guarded_execution_edge(from_status, to_status):
         return False
     values: dict = {"status": to_status.value}
     if validation_failure_reason is not None:

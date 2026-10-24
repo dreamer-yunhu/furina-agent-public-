@@ -72,7 +72,9 @@ check("包根只导出 __version__", furina_core.__all__ == ["__version__"], str
 
 # 红线一/二 的**静态**检查（README §2 里那两条 grep 的可执行版本）
 _CORE_SRC = Path(__file__).resolve().parents[1] / "src" / "furina_core"
-_BANNED = {"asyncpg", "psycopg", "redis", "lancedb", "furina_web", "furina_desktop"}
+# <- AI 改动（T22）：core 不得依赖 LangGraph —— 图恢复属于上层（T23）
+_BANNED = {"asyncpg", "psycopg", "redis", "lancedb", "langgraph",
+           "furina_web", "furina_desktop"}
 _IMPORT_RE = re.compile(r"^(?:from|import)\s+([A-Za-z_][\w.]*)", re.M)
 _violations = []
 for _py in sorted(_CORE_SRC.rglob("*.py")):
