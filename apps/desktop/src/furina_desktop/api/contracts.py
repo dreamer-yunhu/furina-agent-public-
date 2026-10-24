@@ -10,6 +10,10 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from furina_desktop.agent.contracts import ReviewDecision
+# ↑ 依赖方向说明：api → agent 已经是既有方向（`api/agent.py` 本来就用 agent.build/stream）；
+#   `agent/contracts.py` 不反向依赖 api，所以不会成环。
+
 
 class AgentRequest(BaseModel):
     user_input: str = Field(max_length=255)
@@ -29,3 +33,12 @@ class RenameThread(BaseModel):
 
 
 # 规定审核字段
+# ── AI 新增 ── 待人工复核
+# 复核重点：review 直接复用图内契约 `ReviewDecision`（含 type 字段与逐条 decisions），
+# 而不是在 HTTP 层再造一个平行结构 —— 否则两处字段一漂移，
+# execute_node 的 model_validate 就会静默丢字段。
+class AgentResumeRequest(BaseModel):
+    """审批恢复请求。前端把 approval_required 事件里的 tool_call_id 原样回传。"""
+
+    chat_thread_id: uuid.UUID
+    review: ReviewDecision

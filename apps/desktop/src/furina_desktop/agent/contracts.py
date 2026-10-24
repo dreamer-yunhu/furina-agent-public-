@@ -14,7 +14,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ReviewAction(str, Enum):
@@ -50,6 +50,11 @@ class WritePreview(BaseModel):
 
     tool_call_id: str  # 工具调用id
     path: str  # 沙箱相对，不给绝对路径
+    # ── AI 新增（T34）──
+    # 写工具现在会自动建父目录，但"会建哪些"必须让审批人看见，
+    # 否则他批准的是"写一个文件"，实际执行的是"建目录 + 写文件"。
+    # 顺序：由浅到深（如 ["sub", "sub/dir"]）；父目录都已存在时为空列表。
+    creates_dirs: list[str] = Field(default_factory=list)
     is_new_file: bool
     old_hash: str | None  # 新建时为 None，乐观锁——保证文件是提出审核时的内容，如果用户在审核期间改了重审
     added: int
@@ -70,7 +75,12 @@ class ItemDecision(BaseModel):
 
     tool_call_id: str  # 关联回 WritePreview
     action: ReviewAction
-    reason: str | None
+    # <- AI 改动：补默认值 None。
+    #    Pydantic v2 里 `str | None` 不带默认值仍然是**必填**，前端批准时通常
+    #    不会带 reason，结果整个 /agent/resume 请求在进入 handler 前就 422
+    #    （冒烟实测：缺省 body 直接 422，连线程归属都来不及校验）。
+    #    复核重点：语义上 reason 只在拒绝时有意义，批准可省略。
+    reason: str | None = None
 
 
 # 前端发的是审核工具的集合

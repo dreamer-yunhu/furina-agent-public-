@@ -24,7 +24,12 @@ class SupervisorState(BaseModel):
     messages: Annotated[list, add_messages]
     """对话历史。add_messages reducer 负责按 id 合并/覆盖"""
 
-    mode: Literal["roleplay", "code"]
+    # <- AI 改动：加默认值 "code"。
+    #    原因：`agent_stream` 构造输入时只传 messages，而 mode 是无默认值的 Literal，
+    #    首次 POST /agent 会直接 ValidationError（TODO T3）。
+    #    复核重点：默认 code 只是"当前唯一可跑的路径"——主管图的 roleplay 分支
+    #    接好后，应该由请求/配置决定 mode，而不是继续吃这个默认值。
+    mode: Literal["roleplay", "code"] = "code"
     """双模式开关（PLAN §七）：闲聊注入全人设，代码场景收敛人设保准确性"""
 
     user_name:str|None = Field(default=None,max_length=255)

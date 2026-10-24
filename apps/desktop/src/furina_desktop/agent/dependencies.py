@@ -7,6 +7,7 @@ import difflib
 from langchain_core.messages import ToolMessage
 from langchain_protocol import ToolCall
 from langgraph.types import Command
+from furina_core.config import settings
 from furina_core.errors import InvalidArgumentError, \
     MissingRequiredArgumentError
 from furina_desktop.agent.contracts import ReviewAction, ReviewDecision, ReviewRequest, WritePreview
@@ -119,6 +120,11 @@ async def build_write_review(*,tool_call, workspace_root)-> WritePreview:
             sandbox_root=workspace_root,
             rel_path=rel_path
         )
+    # <- AI 改动（T16）：目录不是"新文件"。原实现 target.is_file() 为 False
+    #    就当成新建，diff 里会显示一个"空文件 → 文本"，审批人看到的信息是假的。
+    #    复核重点：这里抛 ValueError 会被 prevalidate_node 的 except 接住并回填给模型。
+    if target.exists() and not target.is_file():
+        raise ValueError(f"目标是目录，不能作为文件写入: {rel_path}")
     if target.is_file():
         old_content =await read_normalized(target)
         is_new = False
@@ -128,10 +134,27 @@ async def build_write_review(*,tool_call, workspace_root)-> WritePreview:
         is_new = True
         old_hash = None
     new_content = tool_call["args"]["text"]
-    add,remove,diff = await make_diff(old_content,new_content,str(target))
+    # <- AI 改动（T15）：fromfile/tofile 原来传的是 `str(target)`（绝对路径），
+    #    审批载荷会把这个人的用户名、目录结构一起送到前端。改用沙箱相对路径。
+    #    复核重点：`as_posix()` 是为了 Windows 反斜杠不污染 diff 头。
+    display_path = Path(rel_path).as_posix()
+    # ── AI 新增（T34）：列出执行时会新建的目录，由浅到深 ──
+    # 复核重点：只统计**尚不存在**的祖先目录；已存在的不列，避免审批人误以为会重建。
+    # 边界：`target.parent` 一路向上走到沙箱根为止，越界路径在 is_resolve_in_sandbox 就被挡了。
+    missing_dirs: list[str] = []
+    root = Path(workspace_root).resolve()
+    parent = target.parent
+    while parent != root and parent.is_relative_to(root):
+        if not parent.exists():
+            missing_dirs.append(parent.relative_to(root).as_posix())
+        parent = parent.parent
+    missing_dirs.reverse()
+
+    add,remove,diff = await make_diff(old_content,new_content,display_path)
     return WritePreview(
         tool_call_id= tool_call["id"],
         path= tool_call["args"]["file_path"],
+        creates_dirs=missing_dirs,
         is_new_file=is_new,
         old_hash=old_hash,
         added=add,
@@ -187,6 +210,31 @@ async def classify_tool_calls(raw_tool_calls,
         else:
             _unknown.append(raw)
     return _risky, _safe, _unknown
+
+
+# ── AI 新增（T14）：审批期间目标文件被改动的检测 ──
+# 背景：`WritePreview.old_hash` 之前只写不校验，用户批准时拿的是几分钟前的 diff，
+# 期间文件可能已被编辑器/别的工具改过 —— 直接覆盖就是静默丢数据。
+# 复核重点：
+#   1. 这是**窄化**竞态窗口，不是消除它：校验通过到 ToolNode 真正落盘之间仍有间隙。
+#      要彻底原子化，得把"重新读 + 比对 + 写"收进同一个执行器（T23）。
+#   2. 新建文件用"是否已存在"判断；存在即冲突，不能悄悄覆盖别人刚创建的文件。
+async def verify_preview_unchanged(*, preview: WritePreview, workspace_root) -> str | None:
+    """返回 None 表示与送审时一致；否则返回冲突说明。"""
+    target = await is_resolve_in_sandbox(
+        sandbox_root=workspace_root,
+        rel_path=preview.path,
+    )
+    if preview.is_new_file:
+        if target.exists():
+            return f"审批期间该文件已被创建：{preview.path}"
+        return None
+    if not target.is_file():
+        return f"审批期间该文件已被删除：{preview.path}"
+    current_hash = await sha256_text(await read_normalized(target))
+    if current_hash != preview.old_hash:
+        return f"审批期间该文件已被修改：{preview.path}"
+    return None
 
 
 #定义回复执行函数
@@ -250,6 +298,33 @@ async def handle_review_fn(*,decision:ReviewDecision,
             },
             goto="model_node",
         )
+    # ── AI 新增（T14）：全批准后、真正执行前，回头核对文件是否还停在送审时的样子 ──
+    #    任何一项冲突都整批作废：因为 ToolNode 是一次性执行整批 tool_calls，
+    #    逐条放行会造出"一半写了、一半没写"的撕裂状态（逐条粒度见 TODO Q1）。
+    #    复核重点：冲突时把 pending 清空并回 model_node，让模型重新发起审批，
+    #    而不是直接抛错 —— 否则这条 thread 会永远停在脏的 interrupt 上。
+    conflicts = []
+    for preview in snapshot.requests:
+        conflict = await verify_preview_unchanged(
+            preview=preview,
+            workspace_root=settings.sandbox_root,
+        )
+        if conflict:
+            conflicts.append(conflict)
+    if conflicts:
+        content = "审批已失效，未执行任何写入：\n" + "\n".join(f"- {item}" for item in conflicts)
+        return Command(
+            update={
+                "coder_messages": [
+                    await build_tool_messages(tc, content=content)
+                    for tc in raw_tool_calls
+                ],
+                "pending_reviews": None,
+                "decision_reviews": None,
+            },
+            goto="model_node",
+        )
+
     # 全批准：清除快照，避免下一次轮次复用旧审批
     return Command(
         update={"pending_reviews": None, "decision_reviews": None},
