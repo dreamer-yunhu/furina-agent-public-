@@ -18,7 +18,11 @@ dependencies = [
     #    真正的红线应该改成下面那条（见文件末尾）。
     "fastapi>=0.139.0",
     "sqlmodel>=0.0.39",
-    "sqlalchemy>=2.0.51",
+    # <- AI 改动：`[asyncio]` extra 不能省。
+    #    SQLAlchemy 2.1 起，异步扩展在 import 期硬性要求 greenlet，且**不再隐式安装**；
+    #    升级后 `sqlalchemy.ext.asyncio` 直接 ImportError（实测 2.1.6）。
+    #    复核重点：服务端只要用 AsyncSession/async_sessionmaker 就必须带这个 extra。
+    "sqlalchemy[asyncio]>=2.0.51",
     "openai>=1.0.0",          # config.make_async_client 用（两边都调 LLM）
 ]
 # 真正的依赖红线（可机械检查）：

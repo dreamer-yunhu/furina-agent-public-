@@ -67,6 +67,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from furina_core.config import settings
+from furina_desktop.agent.tools.path_jail import ensure_sandbox_root
 from furina_desktop.api import agent
 from furina_desktop.storage.lifespan import (
     close_checkpoint_store,
@@ -183,6 +184,17 @@ async def lifespan(app: FastAPI):
        因为 `build_graph` 需要它当 checkpointer。
     """
     logger.info("桌面版启动中")
+
+    # ⓪ 沙箱根（问题 1）
+    # <- AI 改动：`.env` 指向的 SANDBOX_ROOT 可能不存在（全新环境就是），
+    #    不建的话第一次写入必然 Errno 2，而审批预览已经正常生成了。
+    #    复核重点：这里失败要拒绝启动 —— 没有沙箱的文件工具不应该上线。
+    try:
+        root = ensure_sandbox_root()
+        logger.info("沙箱根就绪：%s", root)
+    except OSError as exc:
+        logger.critical("沙箱根创建失败，拒绝启动：%s", exc)
+        raise
 
     # ① 业务库（user / thread / task / execution / approval）
     # <- AI 改动：新增这一步。原来 desktop 从未设置 app.state.async_session，

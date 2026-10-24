@@ -7,7 +7,8 @@
 
     注：tools 节点内部调用会改文件的工具时，工具自带 interrupt() → 图在此暂停
 """
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command,interrupt
 from langgraph.prebuilt import ToolNode
 from langchain.messages import HumanMessage,SystemMessage
@@ -36,7 +37,14 @@ async def prepare_node(state: CoderState) -> dict:
     :return:更新字典
     """
     tool_tasks = state.subagent_task
-    return {"coder_messages":[HumanMessage(tool_tasks)]}
+    # <- AI 改动（T13）：进子图先清空 coder_messages。
+    #    原因：add_messages 是**追加**语义，prepare_node 原来只 append 不清理，
+    #    同一 thread 第二次调 coder 会把上一轮的工具调用/结果一起带进来
+    #    —— 不报错，但模型的输入是脏的（9.14 A-7 预测，实测复现）。
+    #    复核重点：清空只发生在子图入口，**resume 不会经过这里**，
+    #    所以中断恢复时本轮上下文不会被误删。
+    #    若将来要让子代理跨任务记忆，应改为按 task_id 分片，而不是取消清空。
+    return {"coder_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), HumanMessage(tool_tasks)]}
 
 async def model_node(state: CoderState):
     """
