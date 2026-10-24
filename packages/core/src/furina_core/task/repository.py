@@ -252,6 +252,37 @@ async def list_approvals(
     return (await session.execute(stmt)).scalars().all()
 
 
+# ── AI 新增（T21）：到期且仍待审的审批请求 ──
+# 复核重点：
+#   1. `now` 必须已经过 `as_utc()`；SQLite 下 aware 绑定已实测可用。
+#   2. 只读查询，不做任何状态变更；limit<=0 时返回空。
+#   3. **必须排除“Task 与 Execution 都已 SUSPENDED”的已挂起对**：
+#      超时不改 approval_status，这些审批会永远满足 PENDING+到期；
+#      不排除的话，有 limit 的扫描会被它们占满，后面的候选永远轮不到（饥饿）。
+#      只排除“两边都 SUSPENDED”的正常完成态，其它不一致仍然返回给 Service 计数。
+async def list_due_pending_approvals(
+    session: AsyncSession, *, now: datetime, limit: int
+) -> Sequence[ApprovalRequest]:
+    if limit <= 0:
+        return ()
+    stmt = (
+        select(ApprovalRequest)
+        .join(AgentExecution, AgentExecution.id == ApprovalRequest.execution_id)
+        .join(AgentTask, AgentTask.id == ApprovalRequest.task_id)
+        .where(
+            ApprovalRequest.approval_status == ApprovalStatus.PENDING.value,
+            ApprovalRequest.deadline_at <= now,
+            ~(
+                (AgentTask.status == TaskStatus.SUSPENDED.value)
+                & (AgentExecution.status == ExecutionStatus.SUSPENDED.value)
+            ),
+        )
+        .order_by(ApprovalRequest.deadline_at.asc(), ApprovalRequest.id.asc())
+        .limit(limit)
+    )
+    return (await session.execute(stmt)).scalars().all()
+
+
 async def decide_approval(
     session: AsyncSession,
     *,

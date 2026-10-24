@@ -74,6 +74,10 @@ from furina_desktop.storage.lifespan import (
     init_checkpoint_store,
 )
 from furina_desktop.storage.database import close_db, init_db
+from furina_desktop.services.timeout_scanner import (
+    start_timeout_scanner,
+    stop_timeout_scanner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -227,11 +231,24 @@ async def lifespan(app: FastAPI):
         await close_db(app)
         raise
 
+    # ④ 审批超时扫描（T21）。⚠️ 它是项目里第一个常驻协程：
+    #    启动失败不应拖垮应用，配置非法只降级 + ERROR 日志。
+    # <- AI 改动：放在图组装之后、yield 之前；关闭时必须先停它再关存储，
+    #    否则扫描器可能拿着已关闭的 session factory 再扫一轮。
+    app.state.timeout_scanner_status = start_timeout_scanner(
+        app,
+        session_factory=app.state.async_session,
+        interval=settings.approval_scan_interval_seconds,
+        batch=settings.approval_scan_batch_size,
+    )
+    logger.info("审批超时扫描：%s", app.state.timeout_scanner_status)
+
     logger.info("就绪，开始接收请求")
     yield
 
     logger.info("关闭中…")
-    # 关闭顺序与初始化相反
+    # 关闭顺序与初始化相反：先停后台任务，再关存储
+    await stop_timeout_scanner(app)
     await close_checkpoint_store(app)
     await close_db(app)
     logger.info("已安全关闭")
@@ -279,6 +296,8 @@ def create_app() -> FastAPI:
             "status": "ok",
             "checkpoint_store": getattr(app.state, "checkpoint_store", None) is not None,
             "graph": getattr(app.state, "graph", None) is not None,
+            # <- AI 改动（T21）：排查“为什么没挂起”时第一眼能确认是不是配置关了
+            "timeout_scanner": getattr(app.state, "timeout_scanner_status", "unknown"),
             # 只报"配没配"，**绝不回显密钥内容**
             "llm_key_configured": bool(settings.api_key),
         }

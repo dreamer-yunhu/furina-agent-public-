@@ -92,6 +92,16 @@ class CommonSettings:
         #    DesktopSettings 必须显式给一个专用目录。
         self.sandbox_root: Path = Path(os.getenv("SANDBOX_ROOT") or ".")
 
+        # ---- 审批超时扫描（T21）----
+        # <- AI 新增：后台扫描的间隔与批量。0 表示关闭后台扫描。
+        #    非法值（负数/非正批量）由桌面端启动时 clamp + ERROR 日志处理。
+        self.approval_scan_interval_seconds: int = int(
+            os.getenv("APPROVAL_SCAN_INTERVAL_SECONDS", "30")
+        )
+        self.approval_scan_batch_size: int = int(
+            os.getenv("APPROVAL_SCAN_BATCH_SIZE", "50")
+        )
+
         # ---- 日志 ----
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO")
         # 相对路径按"工作目录"解析，别写进源码树
