@@ -83,9 +83,9 @@ async def main() -> None:
 
     async def run(task: str) -> None:
         # <- AI 改动（Stage A）：入口只给 task_input，意图 → 子图字段由校验节点映射
+        # <- AI 改动（第二轮审计 D4）：不再传 intent_attempts，轮次重置在 begin_turn_node
         await graph.ainvoke(
-            {"messages": [HumanMessage(content=task)], "task_input": task,
-             "intent_attempts": 0},
+            {"messages": [HumanMessage(content=task)], "task_input": task},
             config,
         )
 

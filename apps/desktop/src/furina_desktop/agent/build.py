@@ -9,10 +9,10 @@
 
 Stage A 实际结构（2026-10-26 落地，取代上面那张旧规划图）：
 
-    START ─▶ intent_node ─▶ validate_intent_node ─┬─(CHAT)───────────▶ chat_graph ─▶ END
-                    ▲                             ├─(CODE)───────────▶ coder_graph ─▶ END
-                    │                             └─(非法 / 不支持)──▶ route_failed_node ─▶ END
-                    └── 校验失败且未达上限：带 intent_error 回 intent_node
+    START ─▶ begin_turn_node ─▶ intent_node ─▶ validate_intent_node ─┬─(CHAT)───────────▶ chat_graph ─▶ END
+                                      ▲                              ├─(CODE)───────────▶ coder_graph ─▶ END
+                                      │                              └─(非法 / 不支持)──▶ route_failed_node ─▶ END
+                                      └── 校验失败且未达上限：带 intent_error 回 intent_node
 
     · 条件边由 `validate_intent_node` 用 `Command(goto=...)` 给出，
       **不是** add_conditional_edges 的字符串映射表 —— 少一张会漂移的表。
@@ -26,6 +26,7 @@ from langgraph.graph.state import CompiledStateGraph
 from furina_desktop.agent.nodes.chat import chat_graph
 from furina_desktop.agent.nodes.coder import coder_graph
 from furina_desktop.agent.nodes.supervisor import (
+    begin_turn_node,
     intent_node,
     route_failed_node,
     validate_intent_node,
@@ -99,6 +100,9 @@ def build_graph(checkpointer: object) ->  CompiledStateGraph:
     builder = StateGraph(SupervisorState)
 
     # ── 主管自身的节点 ──
+    # <- AI 改动（第二轮审计 D4）：轮次起点。每个 run 从 START 进来先清 run 级字段，
+    #    重试边直接回 intent_node，不重复经过这里。理由见 nodes/supervisor.py 模块 docstring。
+    builder.add_node("begin_turn_node", begin_turn_node)
     builder.add_node("intent_node", intent_node)
     builder.add_node("validate_intent_node", validate_intent_node)
     builder.add_node("route_failed_node", route_failed_node)
@@ -107,7 +111,8 @@ def build_graph(checkpointer: object) ->  CompiledStateGraph:
     builder.add_node("chat_graph", chat_graph)
     builder.add_node("coder_graph", coder_graph)
 
-    builder.add_edge(START, "intent_node")
+    builder.add_edge(START, "begin_turn_node")
+    builder.add_edge("begin_turn_node", "intent_node")
     builder.add_edge("intent_node", "validate_intent_node")
     # 校验节点的出口是 Command(goto=...)，因此这里没有 add_conditional_edges。
     builder.add_edge("chat_graph", END)

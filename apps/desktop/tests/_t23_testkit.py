@@ -14,6 +14,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+import furina_desktop.agent.nodes.supervisor as supervisor_mod
 from furina_core.models import AgentThreadID, User
 from furina_desktop.agent.runtime import AgentRuntime, set_runtime
 
@@ -46,11 +47,26 @@ class FakeIntent:
 
 def install_intent(intent: str = "CODE", script: list[str] | None = None) -> FakeIntent:
     """把主管意图模型换成替身，返回它以便断言调用次数。"""
-    import furina_desktop.agent.nodes.supervisor as supervisor_mod
-
     model = FakeIntent(intent=intent, script=script)
     supervisor_mod.intent_llm = model
     return model
+
+
+# ── AI 新增（第二轮审计 D6）：没装替身就**立刻报错**，而不是静默连网 ──
+# 历史事故：smoke_t23_decision_api 忘了装意图替身 → intent_node 调真模型 →
+# 路由失败 → 等不到 approval_required，表现为 StopIteration（原因藏在很下游）。
+# 现在导入本模块即把意图模型换成 fail-fast 桩；用例开头再 install_intent(...) 覆盖。
+# 复核重点：这是**测试进程内的副作用**，只在 `_t23_testkit`（测试专用模块）里做，
+# 不要把它搬进产品代码。
+class _IntentNotInstalled:
+    async def ainvoke(self, messages):
+        raise RuntimeError(
+            "测试未安装意图替身：请在用例开头调用 install_intent(...)，"
+            "否则会真的连网（第二轮审计 D6）。"
+        )
+
+
+supervisor_mod.intent_llm = _IntentNotInstalled()
 
 
 async def make_runtime(root: Path, *, sandbox: Path, timeout: int = 600):
@@ -92,13 +108,13 @@ def run_input(instruction: str, run) -> dict:
     # <- AI 改动（Stage A · D-SUP-04/05）：去掉了 `mode` 与直传的 `subagent_task`。
     唯一权威输入是 `task_input`；`subagent_task` 由 validate_intent_node 按意图映射产生。
     """
+    # <- AI 改动（第二轮审计 D4）：不再在这里重置 `intent_attempts`。
+    #    轮次边界在图内（`begin_turn_node`），调用方只管给权威输入。
     return {
         "messages": [{"role": "user", "content": instruction}],
         "task_input": instruction,
         "task_id": str(run.task_id),
         "execution_id": str(run.execution_id),
-        # 与 stream.agent_stream 一致：每次 run 重置意图重试计数（见那里的说明）
-        "intent_attempts": 0,
     }
 
 

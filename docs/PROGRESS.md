@@ -31,6 +31,13 @@
 
 > 2026-10-24 补充：流式桥的关键事实是**必须 `subgraphs=True`**。不开的话，run 停在 interrupt 时 `messages` 流一个 token 都不吐，resume 时才把中断前的消息整条重放（见 `stream.py` 模块 docstring 的实测记录）。
 
+> 2026-10-26 补充（Stage A 已落地，上表第 25 行"主管图业务节点全 NotImplementedError"只对画像/RAG/生成/持久化成立）：
+> **意图路由（CHAT / CODE）已跑通** —— `agent/nodes/supervisor.py` + `agent/nodes/chat.py`，
+> 入口只传 `task_input`，路由权威位是程序校验后的 `intent`。轮次边界由 `begin_turn_node` 收口。
+> 证据：20 个冒烟脚本 **651/651**（含新增 `smoke_supervisor_turns` 29 条）；真实模型端到端
+> （`POST /agent` → CHAT 流式 / CODE 审批中断 → `/agent/resume` → 终态一致）已实测。
+> 详见 `docs/audit/2026-10-26-StageA-第二轮审计与修复.md`。
+
 ---
 
 ## 1. 时间线
@@ -271,6 +278,23 @@ cd C:\furina-agent
 
 > 原 `AI-CHANGES.md` 的职责并入本节；完整历史见 git。
 > 新增改动请追加到本表，并写明**复核重点**。
+
+### 2026-10-26（第二轮）· Stage A 跨轮状态残留修复
+
+> 依据：`docs/audit/2026-10-26-StageA-第二轮审计与修复.md`（含缺陷 D1~D7 与证据）。
+> 一句话：把"按 run 重置 state"从**三个调用方各写一遍**改成**图内的一个轮次起点节点**。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `agent/state.py` | **新增 `intent_reason: str \| None`**（`max_length=255`）：意图模型 `reason` 的落点 | 消费者只有两个：路由失败并进 `route_error`（用户可见）、成功路由打一条 INFO 日志。**它不是判断依据**，任何分支都不许读它做决策；run 级字段，由 `begin_turn_node` 清空 |
+| `agent/nodes/supervisor.py` | **新增 `begin_turn_node`** + `_RUN_SCOPED_NULLABLE`：从 START 进来先重置 `intent/intent_raw/intent_reason/intent_error/route_status/route_error/result/subagent_task` 与 `intent_attempts=0`；`_parse_intent` 返回值改成具名 `ParsedIntent` 并解析 `reason`（`_clean_reason`：缺/空/类型错→`None`，超长截断 255，永不抛异常） | ① **只清 run 级字段**，绝不能加 `messages`；② 重试边直达 `intent_node`、`resume` 从断点继续，都不经过它 —— 这是重试反馈与审批恢复不变的前提；③ 新增运行期字段时记得登记进 `_RUN_SCOPED_NULLABLE`；④ `reason` **不参与校验、不影响重试**，别把它塞进 `format_error` 分支 |
+| `agent/build.py` | 接线 `START → begin_turn_node → intent_node`（原 `START → intent_node`） | 图拓扑变了：从 START 重跑旧现场会多走一个节点（生产每次新 thread，无影响）；resume 不走 START，不受影响 |
+| `agent/stream.py` | **删除**入口的 `"intent_attempts": 0` | 别加回来 —— 加回来等于恢复"三处各写一遍"的旧结构，D1~D3 就是这么漏出来的 |
+| `api/contracts.py` | `AgentRequest.user_input` 加 `min_length=1` + 去空白校验（空白 → 422） | 校验放 HTTP 层（用户错误）；`intent_node` 的 `ValueError` 保留为绕开 HTTP 时的最后断言 |
+| `tests/_t23_testkit.py` | 删除 `run_input` 里的 `intent_attempts`；**导入即把意图模型换成 fail-fast 桩**（忘装替身立刻报错，不再静默连网） | 这是测试进程内的副作用，只允许存在于测试专用模块 |
+| `tests/smoke_coder_isolation.py` | 去掉手工的 `intent_attempts: 0` | 同上 |
+| `tests/smoke_supervisor_turns.py` | **新建**：同一 thread 四种轮次组合 + 重试预算 + `messages` 保留 + `intent_reason` 跨轮，29 条 | 段 2 的"无陈旧反馈"断言只扫 `HumanMessage`（提示词本身含该字样，扫 SystemMessage 会假红） |
+| `docs/audit/2026-10-26-StageA-第二轮审计与修复.md` | **新建**：本轮审计与修复记录 | 含 D1~D7、`reason` 占位与消费者、651 项断言复跑结果 |
 
 ### 2026-10-26 · Stage A：主管图接入（CHAT / CODE 路由）
 

@@ -17,12 +17,15 @@
     4. 首次非法、第二次合法 → 正常路由，intent_attempts=2
     5. 格式合法但意图不受支持（RAG）→ 立即失败，**不重试**
     6. 状态契约：chat / coder / supervisor 三份 State 的字段边界
+    7. `intent_reason`：能落盘、缺失/类型错不阻塞路由、超长截断；
+       失败时并入 route_error 文案（用户可见），成功路由写一条 intent/reason 日志
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -156,6 +159,74 @@ async def main() -> None:
     check("CoderState exposes result", "result" in CoderState.model_fields)
     check("SupervisorState has no coder_messages", "coder_messages" not in SupervisorState.model_fields)
     check("SupervisorState has no chat_messages", "chat_messages" not in SupervisorState.model_fields)
+    check("SupervisorState reserves intent_reason", "intent_reason" in SupervisorState.model_fields)
+
+    # ═══ 7. intent_reason 占位（第二轮审计拍板）═══
+    # 规则：可选、不参与校验、不影响重试。缺/空/类型错 → None；超长截断。
+    print("\n=== 7. intent_reason 占位 ===")
+    install_intent(script=[json.dumps({"intent": "CHAT", "reason": "闲聊"})])
+    chat_mod.chat_llm = FakeModel("好")
+    state = await run_case(graph, "reason-ok", "在吗")
+    check("reason captured", state.get("intent_reason") == "闲聊",
+          str(state.get("intent_reason")))
+
+    install_intent(script=[json.dumps({"intent": "CHAT"})])
+    state = await run_case(graph, "reason-missing", "在吗")
+    check("missing reason → None", state.get("intent_reason") is None,
+          str(state.get("intent_reason")))
+
+    install_intent(script=[json.dumps({"intent": "CHAT", "reason": 123})])
+    state = await run_case(graph, "reason-badtype", "在吗")
+    check("non-string reason → None, still routed",
+          state.get("intent_reason") is None and state.get("intent") == "CHAT",
+          str(state.get("intent_reason")))
+
+    install_intent(script=[json.dumps({"intent": "CHAT", "reason": "很" * 300})])
+    state = await run_case(graph, "reason-long", "在吗")
+    check("long reason truncated, graph survives",
+          state.get("intent") == "CHAT" and len(state.get("intent_reason") or "") == 255,
+          f"n={len(state.get('intent_reason') or '')}")
+
+    install_intent(script=[json.dumps({"intent": "RAG", "reason": "查资料"})])
+    state = await run_case(graph, "reason-unsupported", "查资料")
+    check("reason kept on route failure", state.get("intent_reason") == "查资料",
+          str(state.get("intent_reason")))
+    check("route_error carries reason", "模型理由：查资料" in (state.get("route_error") or ""),
+          str(state.get("route_error")))
+
+    # 重试耗尽时，最后一跳可能仍是"合法 JSON 但缺 intent 字段"——reason 要留住
+    install_intent(script=[json.dumps({"intent": 123, "reason": "结构化输出"})])
+    state = await run_case(graph, "reason-exhausted", "随便")
+    check("route_status=failed", state.get("route_status") == "failed",
+          str(state.get("route_status")))
+    check("reason survives retry exhaustion", state.get("intent_reason") == "结构化输出",
+          str(state.get("intent_reason")))
+    check("exhausted route_error carries reason",
+          "模型理由：结构化输出" in (state.get("route_error") or ""),
+          str(state.get("route_error")))
+
+    # 成功路由也要留一条可检索的痕迹（checkpoint 里的 intent_raw 没人会去翻）
+    class _ListHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages: list[str] = []
+
+        def emit(self, record) -> None:
+            self.messages.append(record.getMessage())
+
+    handler = _ListHandler()
+    sup_logger = logging.getLogger("furina_desktop.agent.nodes.supervisor")
+    sup_logger.addHandler(handler)
+    sup_logger.setLevel(logging.INFO)
+    try:
+        install_intent(script=[json.dumps({"intent": "CODE", "reason": "要改文件"})])
+        coder_mod.llm_with_tools = FakeModel("改好了")
+        await run_case(graph, "reason-log", "改一下配置")
+    finally:
+        sup_logger.removeHandler(handler)
+    check("success route logged with intent+reason",
+          any("intent=CODE" in m and "reason=要改文件" in m for m in handler.messages),
+          str(handler.messages))
 
     ok = sum(1 for _, o in _results if o)
     print(f"\n{ok}/{len(_results)} passed")

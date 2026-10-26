@@ -297,12 +297,11 @@ async def agent_stream(
         "task_input": inform.user_input,
         "task_id": str(run.task_id),
         "execution_id": str(run.execution_id),
-        # <- AI 改动（核验修正）：按 run 重置重试计数。
-        #    intent_attempts 会被 intent_node 累加，而 LangGraph 把输入**合并**进已有 state：
-        #    同一个 graph_thread_id 再跑一次，计数会从上一轮继续 → 重试预算被吃掉。
-        #    生产上每次 run 都是新 execution / 新 thread，本来不会撞上；但
-        #    `smoke_coder_isolation` 这类"同一 thread 跑三轮"的用法会。显式归零最省事。
-        "intent_attempts": 0,
+        # <- AI 改动（第二轮审计 D4）：这里**不再**重置 `intent_attempts`。
+        #    轮次边界已经收进图里（`nodes/supervisor.py::begin_turn_node`），
+        #    由 START 之后的第一个节点统一清 run 级字段。入口只提供权威输入。
+        #    复核重点：如果有人把重置加回这里，等于恢复"三处各写一遍"的旧结构 ——
+        #    下次新增入口又会漏掉某个字段（D1~D3 就是这么来的）。
     }
     async for frame in _stream_graph(
         graph=graph,

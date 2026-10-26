@@ -1,9 +1,20 @@
-"""主管图的三个节点：意图识别 / 意图校验 / 路由失败落点。
+"""主管图的四个节点：轮次起点 / 意图识别 / 意图校验 / 路由失败落点。
 
-    START ─▶ intent_node ─▶ validate_intent_node ─┬─(CHAT)────────▶ chat_graph ─▶ END
-                    ▲                             ├─(CODE)────────▶ coder_graph ─▶ END
-                    │                             └─(非法/不支持)─▶ route_failed_node ─▶ END
-                    └── Command(goto="intent_node")  · 带着 intent_error 重试
+    START ─▶ begin_turn_node ─▶ intent_node ─▶ validate_intent_node ─┬─(CHAT)────────▶ chat_graph ─▶ END
+                                      ▲                              ├─(CODE)────────▶ coder_graph ─▶ END
+                                      │                              └─(非法/不支持)─▶ route_failed_node ─▶ END
+                                      └── Command(goto="intent_node")  · 带着 intent_error 重试
+
+为什么要有 `begin_turn_node`（2026-10-26 第二轮审计修正 D1~D4）：
+    LangGraph 把入口输入**合并**进已有 state。同一个 `graph_thread_id` 再跑一轮时，
+    上一轮的 `intent_error` / `result` / `subagent_task` 会原样留在 state 里 ——
+    其中 `intent_error` 会被 `intent_node` 当成"刚才那次失败"回填给模型
+    （实测：新一轮第一次分类就被塞进一个不存在的前置失败前提）。
+    之前只在入口重置 `intent_attempts` 一个字段，且这份重置散落在 3 个调用方，
+    属于"修值"不"修结构"。现在把**轮次边界**收进图里：每个 run 从 START 进来
+    先清一遍 run 级字段；重试边直达 `intent_node`、`Command(resume=...)` 从断点
+    继续，两者都**不经过**本节点，所以重试与审批恢复的语义不变。
+    ⚠️ 只清 run 级字段，**不动** `messages` / `task_id` / `execution_id` / `task_input`。
 
 为什么要拆成两个节点（D-SUP-02）：
     · 模型只负责"给出一个候选"，**合法值由程序定义**（`contracts.Intent`）；
@@ -31,7 +42,9 @@ SSE 相关（D-SUP-08）：
 from __future__ import annotations
 
 import json
+import logging
 import re
+from typing import NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
@@ -41,6 +54,8 @@ from furina_desktop.agent.dependencies import message_text
 from furina_desktop.agent.llm import supervisor_llm
 from furina_desktop.agent.prompts.loader import aload_prompt
 from furina_desktop.agent.state import SupervisorState
+
+logger = logging.getLogger(__name__)
 
 MAX_INTENT_ATTEMPTS = 2
 """意图模型的调用上限（首次 + 1 次重试）。"""
@@ -54,6 +69,37 @@ _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 # 测试用注入点：沿用 `coder_mod.llm_with_tools` 的既有手法（模块级变量 + monkeypatch）。
 intent_llm = supervisor_llm
+
+# ── AI 新增（第二轮审计 D1~D4）：只在**轮次边界**清空的字段 ──
+# 判据：这些字段描述"这一次 run 的结论"，跨 run 携带一定是错的。
+# ⚠️ 不要往里加 messages / task_input / task_id / execution_id ——
+#    它们要么是历史（messages），要么由入口每轮重新提供。
+_RUN_SCOPED_NULLABLE = (
+    "intent",
+    "intent_raw",
+    "intent_reason",
+    "intent_error",
+    "route_status",
+    "route_error",
+    "result",
+    "subagent_task",
+)
+
+
+async def begin_turn_node(state: SupervisorState) -> dict:
+    """轮次起点：把上一轮残留的运行期字段重置。
+
+    # ── AI 新增 ── 待人工复核
+    复核重点：
+      1. 这个节点**只**清 run 级字段。清 `messages` 会删掉主管的对话历史，
+         那是另一种伤害，别为了"干净"顺手加上。
+      2. `intent_attempts` 单独写 0 —— 上面那张表里放 None 会撞 Pydantic 的 int 校验。
+      3. 重试边是 `Command(goto="intent_node")`，**绕开本节点**；
+         审批恢复是 `Command(resume=...)`，也从断点继续。两者都不受影响。
+    """
+    update: dict = {name: None for name in _RUN_SCOPED_NULLABLE}
+    update["intent_attempts"] = 0
+    return update
 
 
 async def intent_node(state: SupervisorState) -> dict:
@@ -83,36 +129,64 @@ async def intent_node(state: SupervisorState) -> dict:
     }
 
 
+def _with_reason(error: str, reason: str | None) -> str:
+    """把模型的 `reason` 拼进**给人看**的错误文案。
+
+    # ── AI 新增（第二轮审计·`reason` 上线）── 待人工复核
+    复核重点：它**只影响文案**，不参与任何判断；`reason` 为空时原样返回。
+      不要用它去拼 `intent_raw` / `messages` —— 那会把模型输出混进对话。
+      文案最终经 `stream._stream_graph` 的 `route_error` 送到前端，
+      所以长度要克制：`reason` 已在解析处截断到 255。
+    """
+    if not reason:
+        return error
+    return f"{error}（模型理由：{reason}）"
+
+
 def validate_intent_node(state: SupervisorState) -> Command:
     """程序侧校验：结构 → 枚举值 → 落点。三个出口互斥。"""
-    decision, format_error, unsupported = _parse_intent(state.intent_raw)
+    parsed = _parse_intent(state.intent_raw)
 
-    if unsupported:
+    if parsed.unsupported:
         # 合法 JSON、但是我们不支持的意图：立即失败，不做无意义重试。
+        # reason 一并落进 state 与错误文案 —— 路由失败时"模型为什么这么选"最有用。
         return Command(
             goto="route_failed_node",
-            update={"intent": None, "route_error": unsupported},
+            update={
+                "intent": None,
+                "intent_reason": parsed.reason,
+                "route_error": _with_reason(parsed.unsupported, parsed.reason),
+            },
         )
 
-    if format_error:
+    if parsed.format_error:
         if state.intent_attempts >= MAX_INTENT_ATTEMPTS:
             return Command(
                 goto="route_failed_node",
                 update={
                     "intent": None,
-                    "route_error": (
-                        f"意图识别重试 {state.intent_attempts} 次仍不合法：{format_error}"
+                    # 最后一跳可能仍是"合法 JSON 但缺 intent 字段"，此时 reason 是有值的
+                    "intent_reason": parsed.reason,
+                    "route_error": _with_reason(
+                        f"意图识别重试 {state.intent_attempts} 次仍不合法：{parsed.format_error}",
+                        parsed.reason,
                     ),
                 },
             )
         return Command(
             goto="intent_node",
-            update={"intent_error": format_error, "intent_raw": None},
+            update={"intent_error": parsed.format_error, "intent_raw": None},
         )
 
+    decision = parsed.intent
     assert decision is not None  # noqa: S101 —— 三个出口互斥，走到这里必然有 decision
+    # <- AI 改动（`reason` 上线）：成功路由也留一条可检索的痕迹。
+    #    checkpoint 里有 intent_raw，但没人会去翻 SQLite；日志是排查时的第一落点。
+    logger.info("意图路由 intent=%s reason=%s", decision.value, parsed.reason)
     update: dict = {
         "intent": decision.value,
+        # <- AI 改动（第二轮审计拍板）：reason 只是**留档 + 排查线索**，不参与任何判断。
+        "intent_reason": parsed.reason,
         "intent_error": None,
         "route_status": "ok",
         "route_error": None,
@@ -133,14 +207,43 @@ def route_failed_node(state: SupervisorState) -> dict:
     return {"route_status": "failed"}
 
 
-def _parse_intent(raw: str | None) -> tuple[Intent | None, str | None, str | None]:
-    """解析模型输出。返回 `(意图, 格式错误, 不支持原因)`，三者互斥。
+class ParsedIntent(NamedTuple):
+    """`_parse_intent` 的返回值。
+
+    # ── AI 新增（第二轮审计拍板）── 待人工复核
+    为什么不用 4 元组：`(intent, reason, format_error, unsupported)` 里有两个
+    相邻的"错误原因"，位置一写反就是静默错误 —— 具名比位置可靠。
+    复核重点：`intent` 为 None 时，`format_error` / `unsupported` **必有且仅有一个**为真。
+    """
+
+    intent: Intent | None
+    reason: str | None
+    format_error: str | None
+    unsupported: str | None
+
+
+# `reason` 只做留档：缺失/空串/类型不对一律 None，超长截断。
+# 上限与 `SupervisorState.intent_reason` 的 max_length 对齐 ——
+# 不在解析处截断的话，模型偶尔写长一句就会撞 Pydantic 校验，让整张图报错。
+_MAX_REASON_CHARS = 255
+
+
+def _clean_reason(payload: dict) -> str | None:
+    """取出 `reason` 并归一化。**永不抛异常、永不阻塞路由。**"""
+    reason = payload.get("reason")
+    if not isinstance(reason, str):
+        return None
+    return reason.strip()[:_MAX_REASON_CHARS] or None
+
+
+def _parse_intent(raw: str | None) -> ParsedIntent:
+    """解析模型输出。`intent` 至多一个出口为真，`reason` 只是附带信息。
 
     ⚠️ 只容忍"整体被代码块包裹"这一种格式噪声（模型常见行为）。
        不做花括号搜索 —— 半截 JSON 被宽容拼接出来，会把真 bug 变成静默错误。
     """
     if not raw or not raw.strip():
-        return None, "输出为空", None
+        return ParsedIntent(None, None, "输出为空", None)
 
     fenced = _FENCE.match(raw.strip())
     text = fenced.group(1) if fenced else raw.strip()
@@ -148,17 +251,23 @@ def _parse_intent(raw: str | None) -> tuple[Intent | None, str | None, str | Non
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        return None, f"不是合法 JSON（{exc.msg}）", None
+        return ParsedIntent(None, None, f"不是合法 JSON（{exc.msg}）", None)
 
     if not isinstance(payload, dict):
-        return None, "JSON 顶层不是对象", None
+        return ParsedIntent(None, None, "JSON 顶层不是对象", None)
 
+    reason = _clean_reason(payload)
     raw_intent = payload.get("intent")
     if not isinstance(raw_intent, str) or not raw_intent.strip():
-        return None, "缺少 intent 字段，或类型不是字符串", None
+        return ParsedIntent(None, reason, "缺少 intent 字段，或类型不是字符串", None)
 
     value = raw_intent.strip().upper()
     if value not in SUPPORTED_INTENTS:
-        return None, None, f"意图 {raw_intent!r} 不在当前版本支持范围 {sorted(SUPPORTED_INTENTS)}"
+        return ParsedIntent(
+            None,
+            reason,
+            None,
+            f"意图 {raw_intent!r} 不在当前版本支持范围 {sorted(SUPPORTED_INTENTS)}",
+        )
 
-    return Intent(value), None, None
+    return ParsedIntent(Intent(value), reason, None, None)

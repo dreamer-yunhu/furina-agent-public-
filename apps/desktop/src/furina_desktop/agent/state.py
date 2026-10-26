@@ -42,6 +42,18 @@ class SupervisorState(BaseModel):
     intent_raw: str | None = Field(default=None)
     """模型的原始输出。单独存放，**不得写进 messages**（否则会被当成对话内容）。"""
 
+    # <- AI 新增（第二轮审计·拍板 2026-10-26）：`reason` 的**占位位**。
+    #    背景：`intent.txt` 让模型输出 `{"intent": ..., "reason": ...}`，但 reason
+    #    原先没有任何归宿，只能从 `intent_raw` 里二次解析，等于"有契约无落点"。
+    #    现在的规则：**可选、不参与校验、不影响重试**——
+    #      缺字段 / 空串 / 类型不对 → None；超长截断到 255，绝不因此让图报错。
+    #    消费者（2026-10-26 接入）：
+    #      · 路由失败时由 `validate_intent_node` 拼进 `route_error` → 随 SSE error 帧到前端；
+    #      · 成功路由时打一条 `意图路由 intent=… reason=…` 的 INFO 日志（排查第一落点）。
+    #    复核重点：它属于 run 级字段，轮次边界由 `begin_turn_node` 清空；
+    #      它不是判断依据 —— 任何逻辑都不许读它来做分支。
+    intent_reason: str | None = Field(default=None, max_length=255)
+
     intent_error: str | None = Field(default=None)
     """上一次校验的失败原因；非空时说明正在重试，会回填给模型。"""
 
