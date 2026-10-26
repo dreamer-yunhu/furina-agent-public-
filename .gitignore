@@ -40,6 +40,11 @@ frontend/src-tauri/target/
 frontend/src-tauri/gen/
 frontend/dist/
 node_modules/
+# ── 实际的前端位置（2026-10-27 起）：apps/desktop/src/frontend ──
+# 上面的 frontend/... 是按仓库根锚定的，覆盖不到这个路径，必须写全
+apps/desktop/src/frontend/dist/
+apps/desktop/src/frontend/src-tauri/target/
+apps/desktop/src/frontend/src-tauri/gen/
 # uv 本地缓存（工作区内，避免写用户目录被沙箱拒绝）
 .uv-cache/
 # 临时探针与个人数据（不进产品仓库）
