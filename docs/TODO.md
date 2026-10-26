@@ -33,6 +33,8 @@
 
 ### [x] T3 修 `mode` 必填导致的首次调用失败
 > ✅ 2026-10-24：`SupervisorState.mode` 默认 `"code"`，`agent_stream` 也显式传。
+> ⚠️ 2026-10-26 已被取代：`mode` **字段已删除**（D-SUP-04），路由权威位是 `intent`。
+> 迁移见 `docs/audit/2026-10-26-StageA-Phase0-核对报告.md` §D-SUP-04。
 - **文件**：`agent/state.py:27`、`agent/stream.py:32`
 - **要做什么**：二选一——给 `mode` 默认值，或在 `agent_stream` 构造输入时显式传入。
 - **验收**：修好 T1 后，第一次 `POST /agent` 不再抛 `ValidationError`。
@@ -70,10 +72,13 @@
 - **验收**：`user_name` / `personal_preference` 能写进 state，且不把 ORM 对象塞进去。
 - **依据**：字段已就位，只差写入。
 
-### [ ] T9 实现 `route_node` + `route_edge`（意图路由）
-- **文件**：`agent/build.py:45-61`
-- **要做什么**：规则优先、LLM 兜底、默认闲聊；返回字符串必须与条件边映射表逐字一致。
-- **验收**：三类输入（闲聊 / 需检索 / 需工具）各走对分支。
+### [x] T9 意图路由（Stage A 落地，形态已调整）
+> ✅ 2026-10-26：落在 `agent/nodes/supervisor.py`（`intent_node` + `validate_intent_node`），
+> 不是原计划的 `build.py` 占位。方案由"规则优先/LLM 兜底"改为 **模型产出 + 程序校验**
+> （D-SUP-01/02），V1 只支持 CHAT / CODE 两条路（D-SUP-09）。
+> 证据：`smoke_supervisor_route.py` 33/33、`smoke_supervisor_stream.py` 22/22。
+- **文件**：`agent/nodes/supervisor.py`、`agent/build.py`
+- **验收**：详见 `docs/audit/2026-10-26-StageA-实施报告.md`。RAG 分支按 D-SUP-09 不实现。
 
 ### [ ] T10 实现 `rag_node`（RAG 检索）
 - **文件**：`agent/build.py:64-72`

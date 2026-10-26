@@ -7,26 +7,29 @@
      ② middleware 在 after_model 拦截，拿不到结构化 diff（只能塞进 description 字符串）
      ③ 黑盒 —— 出问题不知道去哪找
 
-目标图结构（PLAN §七 + §十二 合并后的形态，**待你确认**）：
+Stage A 实际结构（2026-10-26 落地，取代上面那张旧规划图）：
 
-    START ─▶ [ 用户画像注入 ] ─▶ [ 意图路由 ] ─┬─(闲聊)───▶ [ LLM 生成(流式) ] ──┐
-                                              ├─(需检索)─▶ [ RAG 检索 ] ────────┤
-                                              └─(需工具)─▶ [ 子代理调度 ] ──────┤
-                                                                                ▼
-                                                                [ 持久化 ] ─▶ END
-                                                     ▲
-                                                     └── 循环回意图路由（多轮工具调用）
+    START ─▶ intent_node ─▶ validate_intent_node ─┬─(CHAT)───────────▶ chat_graph ─▶ END
+                    ▲                             ├─(CODE)───────────▶ coder_graph ─▶ END
+                    │                             └─(非法 / 不支持)──▶ route_failed_node ─▶ END
+                    └── 校验失败且未达上限：带 intent_error 回 intent_node
 
-    ⚠️ 装配前先定：§七 的「LLM 生成」和 §十二 的「主管」是不是同一个东西？
-       如果不是，子代理调度节点挂在哪一步？—— 这个不定，下面的装配写不下去
+    · 条件边由 `validate_intent_node` 用 `Command(goto=...)` 给出，
+      **不是** add_conditional_edges 的字符串映射表 —— 少一张会漂移的表。
+    · 旧规划里的「用户画像 / RAG / 持久化」仍是占位（D-SUP-09 非目标），不装配。
 """
 from fastapi import Request
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 
+from furina_desktop.agent.nodes.chat import chat_graph
 from furina_desktop.agent.nodes.coder import coder_graph
-from furina_desktop.agent.llm import llm
+from furina_desktop.agent.nodes.supervisor import (
+    intent_node,
+    route_failed_node,
+    validate_intent_node,
+)
 from furina_desktop.agent.state import SupervisorState
 
 
@@ -42,24 +45,11 @@ async def profile_node(state: SupervisorState):
     raise NotImplementedError
 
 
-async def route_node(state: SupervisorState):
-    """意图路由（PLAN §七）
-
-    TODO: [主管-2] 实现
-      边界：原 PLAN 定的是「规则优先，LLM 兜底，默认闲聊」——
-            「规则」具体判什么？关键词？还是 state["mode"] 直接决定？
-    """
-    raise NotImplementedError
-
-
-def route_edge(state:SupervisorState) -> str:
-    """条件边：决定走闲聊 / 检索 / 工具
-
-    TODO: [主管-3] 实现
-      返回字符串必须与 add_conditional_edges 映射表的 key 逐字一致
-    """
-    raise NotImplementedError
-
+# [主管-2] / [主管-3] 已落地，位置变了：
+#   意图路由的节点与落点映射在 `agent/nodes/supervisor.py`
+#   （intent_node / validate_intent_node / route_failed_node）。
+#   原来这里两个 `raise NotImplementedError` 的占位已删除 ——
+#   留着会和真实现并存，读代码的人无法判断哪个才是权威。
 
 async def rag_node(state:SupervisorState):
     """RAG 检索（PLAN §七 / §二）
@@ -73,11 +63,13 @@ async def rag_node(state:SupervisorState):
 
 
 async def generate_node(state:SupervisorState):
-    """LLM 生成（流式）
+    """主管侧的 LLM 生成（占位，Stage A 未装配）。
 
     TODO: [主管-5] 实现
-      边界 1：按 state["mode"] 切换人设（roleplay / code）
-      边界 2：流式输出要能对接现有 SSE —— 观测通道见 services/agent_stream.py
+      · CHAT 的生成已经在 `nodes/chat.py` 里跑通（子图，不经本节点）；
+        本节点留给 V2"主管需要多轮生成 / 汇总子图结果"的场景。
+      · 原注释里的 `state["mode"]` 已删除（D-SUP-04），人设切换归子图管。
+      边界 2：流式输出要能对接现有 SSE —— 观测通道见 agent/stream.py
     """
     raise NotImplementedError
 
@@ -92,20 +84,37 @@ async def persist_node(state:SupervisorState):
 
 
 def build_graph(checkpointer: object) ->  CompiledStateGraph:
-    """组装主管图
+    """组装主管图（Stage A）。
 
-    TODO: [主管-7] 完成装配
-      提示：这是**唯一**编译 checkpointer 的地方
-            （PLAN §十四 / 9.11 验证手册 前提 2）
-      边界：coder 子图以「节点」形式挂进来（路线 B）—— 见 node/coder.py
-           挂节点 vs 挂编译好的子图，state schema 的对应关系要想清楚
+    这是**唯一**编译 checkpointer 的地方。子图以「编译好的图当节点」形式挂载
+    （路线 B）：这样 namespace 里才有 `coder_graph:<id>` 前缀，SSE 归属、
+    审批恢复预检（`runtime.preflight_resume` 深度遍历子图快照）才成立。
+
+    ⚠️ 复核重点：
+      1. 子图节点名（`coder_graph` / `chat_graph`）同时被 `agent/stream.py`
+         的 `_AGENT_BY_NODE` 与 `nodes/supervisor.py` 的 `_GOTO` 引用 —— 改名要同步两处。
+      2. `chat_graph` / `coder_graph` 的**输出字段**靠与 SupervisorState 同名映射回传
+         （`result`）；不同名的字段（`coder_messages` / `chat_messages`）出不去子图。
     """
-    builder =StateGraph(SupervisorState)
-    builder.add_node("coder_graph",coder_graph)
-    builder.add_edge(START,"coder_graph")
-    builder.add_edge("coder_graph",END)
-    # TODO: [主管-7] 在这里挂节点、接条件边、compile(checkpointer=...)
-    supervisor= builder.compile(checkpointer = _unwrap_checkpointer(checkpointer))
+    builder = StateGraph(SupervisorState)
+
+    # ── 主管自身的节点 ──
+    builder.add_node("intent_node", intent_node)
+    builder.add_node("validate_intent_node", validate_intent_node)
+    builder.add_node("route_failed_node", route_failed_node)
+
+    # ── 子图 ──
+    builder.add_node("chat_graph", chat_graph)
+    builder.add_node("coder_graph", coder_graph)
+
+    builder.add_edge(START, "intent_node")
+    builder.add_edge("intent_node", "validate_intent_node")
+    # 校验节点的出口是 Command(goto=...)，因此这里没有 add_conditional_edges。
+    builder.add_edge("chat_graph", END)
+    builder.add_edge("coder_graph", END)
+    builder.add_edge("route_failed_node", END)
+
+    supervisor = builder.compile(checkpointer=_unwrap_checkpointer(checkpointer))
     return supervisor
 
 

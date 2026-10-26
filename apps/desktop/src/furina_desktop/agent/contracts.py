@@ -17,6 +17,25 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class Intent(str, Enum):
+    """主管意图（Stage A · D-SUP-01）。
+
+    # <- AI 新增（Stage A）
+    合法值**由程序定义**，模型只能在这几个值里挑一个 —— 这是"模型不得自由创造
+    路由名称"的落点。V1 只支持这两条路（D-SUP-09：不提前实现 RAG / 多任务）。
+
+    复核重点：新增成员 = 新增一条图路径，必须同时改 `build.py` 的装配与
+    `nodes/supervisor.py` 的 `_GOTO` 映射，否则校验通过也没有落点。
+    """
+
+    CHAT = "CHAT"  # 聊天、一般非代码交流
+    CODE = "CODE"  # 编程、代码分析、调试
+
+
+SUPPORTED_INTENTS = frozenset(item.value for item in Intent)
+"""受支持的意图值集合。校验节点用它区分"格式非法"与"合法但不支持"（D-SUP-02）。"""
+
+
 class ReviewAction(str, Enum):
     """审批动作。
 

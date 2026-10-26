@@ -25,7 +25,7 @@ from furina_desktop.agent.contracts import ReviewDecision, ReviewRequest
 from furina_core.config import settings
 from furina_core.task.enums import ToolExecutionStatus
 from furina_desktop.agent.dependencies import build_write_review, build_tool_messages, classify_tool_calls, \
-    handle_review_fn
+    handle_review_fn, message_text
 from furina_desktop.agent.runtime import ApprovalDraft, ApprovalSetupError, get_runtime
 
 coder_tools = registry.coder_tool
@@ -320,6 +320,16 @@ async def execute_node(state: CoderState)->Command:
 
 
 
+# <- AI 新增（Stage A）：CODE 的输出契约位。
+#    与 SupervisorState.result 同名 → 子图结束时按字段映射回传给主管（D-SUP-05）。
+#    复核重点：这里只交付**结论文本**，不要把 coder_messages 搬出去；
+#    审批中断时不会走到这里（interrupt 停在 review_node），所以 result 为 None
+#    才是"被打断"的正常表现，别把它当成失败。
+async def finish_node(state: CoderState) -> dict:
+    latest = state.coder_messages[-1] if state.coder_messages else None
+    return {"result": message_text(latest) if isinstance(latest, AIMessage) else None}
+
+
 def should_continue(state:CoderState) -> str:
     """
     条件边：判断回 model 还是结束
@@ -327,11 +337,14 @@ def should_continue(state:CoderState) -> str:
     # <- AI 改动：有 tool_calls 时先去 prevalidate_node，不再直接送 review_node。
     #    原因：安全工具也必须被分类；直接送 review 会让全安全批次卡在审批门。
     #    用 getattr 是因为最后一条消息可能是 ToolMessage（没有 tool_calls 属性）。
+    # <- AI 改动（Stage A）：无 tool_calls 时去 finish_node 而不是直接 END，
+    #    由它把最后一条文本写进 result。复核重点：finish_node **不调模型、不碰库**，
+    #    只做字段搬运；加逻辑前先想清楚它会不会影响恢复时的字段映射。
     message = state.coder_messages[-1]
     if getattr(message, "tool_calls", None):
         return "prevalidate_node"
     else:
-        return "END"
+        return "finish_node"
 
 
 def build_coder(*,coder_prepare_node
@@ -358,6 +371,8 @@ def build_coder(*,coder_prepare_node
     #    原来这两个函数只有定义，没有节点，导致审批门不可达（B3/B5）。
     builder.add_node("prevalidate_node",coder_prevalidate_node)
     builder.add_node("execute_node",coder_execute_node)
+    # <- AI 改动（Stage A）：结果收口节点（把最后一条文本写进 result）。
+    builder.add_node("finish_node",finish_node)
     #添起始加边
     builder.add_edge(START,"prepare_node")
     #添加预构建节点到llm调用的边
@@ -367,11 +382,13 @@ def build_coder(*,coder_prepare_node
     builder.add_conditional_edges(
         "model_node",
         coder_should_continue,
-        {"prevalidate_node":"prevalidate_node","END":END}
+        {"prevalidate_node":"prevalidate_node","finish_node":"finish_node"}
 
     )
     #添加工具节点到llm节点的边
     builder.add_edge("tools_node","model_node")
+    # <- AI 改动（Stage A）：收口之后子图结束。
+    builder.add_edge("finish_node",END)
     graph = builder.compile()
     return graph
 

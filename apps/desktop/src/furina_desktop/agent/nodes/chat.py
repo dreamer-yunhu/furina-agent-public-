@@ -1,72 +1,82 @@
-"""roleplay（闲聊）模式的节点 —— **当前未接入图**。
+"""CHAT 子图 —— 纯对话路径（Stage A 接入主管图）。
 
-═══════════════════════════════════════════════════════════════════════
-⚠️ 这个文件的状态：未接入 + 原来根本导不进来
-═══════════════════════════════════════════════════════════════════════
+    START ─▶ prepare_node ─▶ model_node ─▶ END
 
-**原来的问题**：它 `from furina_desktop.agent.state import State` —— 但 `state.py` 里
-**没有 `State` 这个类**（只有 `SupervisorState` / `CoderState`）。
-也就是说这个文件**从来就 import 不成功**，而且**全项目没有任何地方引用它**
-（实测：只有它自己引用自己的函数名）。
+与 coder 子图的分工：
 
-**为什么保留而没有删掉**：它的逻辑对 **M1（芙宁娜可对话）** 直接相关 ——
-它就是"主管图里的 LLM 生成节点"。删掉很容易，但 M1 时还得再写一遍。
-所以这里把它**修成能 import 的样子**，并标清它离"能用"还差什么。
+    chat（本文件）   纯对话，**不挂工具**，不需要审批，没有 interrupt
+    coder            读/写工具 + HITL 审批 + checkpoint 恢复
 
-**修了什么**：`State` → `SupervisorState`（依据：原代码用 `state.messages`，两边都有该字段）。
+为什么是"子图"而不是挂在主管图上的一个节点（Stage A 已拍板）：
+    1. 事件归属靠 namespace 判定（`stream._agent_of`），子图才有稳定前缀；
+    2. 独立 `ChatState` 满足 D-SUP-05 —— 主管不需要看到 chat 的内部消息；
+    3. 不会出现"所有子图都有 coder_messages"这种错误假设（D-SUP-08）。
 
-**离能用还差什么**（M1 的活）：
-    1. **人设注入**：现在把 `state.messages` 原样丢给模型，没有 system prompt。
-       而人设的来源是：
-         · `agent/prompts/furina.txt` —— **实测 0 字节，是空的**
-         · `knowledge/persona/` —— 约 125 KB 语料，**没有任何代码读它**
-       → M1 第一件事是填人设，第二件是接 RAG（M2）
-    2. **用户画像**：`SupervisorState` 已有 `user_name` / `personal_preference` 字段
-       （PLAN §6 的那个缺口），但**没有任何节点往里写**。本节点拼 prompt 时该用上。
-    3. **流式输出**：现在是 `ainvoke`（一次性返回）。要流式得走 `astream`，
-       而那属于 `agent/stream.py`（SSE 桥）的职责，不是节点内的事。
-    4. **接进图**：`agent/build.py` 的 `build_graph` 现在只有
-       `START → coder_graph → END`，**没有 roleplay 分支**。
+契约（与主管的唯一接口）：
+    输入  task_input  ← 主管同名映射
+    输出  result      ← 同名映射回主管
 
-═══════════════════════════════════════════════════════════════════════
-它和 coder 的分工（双模式）
-═══════════════════════════════════════════════════════════════════════
-
-    roleplay（本文件）  纯对话，**不挂工具**，不需要审批
-    code（coder 子图）  挂读/写工具，写操作进 HITL 审批
-
-**两者的差别不只是 system prompt，是整套能力清单** —— 详见 docs/DESKTOP-PLAN.md §4.4。
+⚠️ 现状：人设文件 `prompts/furina.txt` 仍是 0 字节。
+   本阶段不接 RAG / Memory（D-SUP-09），只保证"能聊、能流式、能归位"。
 """
 
 # ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
 # 复核重点：
-#   1. 我把 `State` 改成了 `SupervisorState` —— **这是推测性修复**，
-#      依据是"原代码用 `state.messages`，而两个 state 都有该字段"。
-#      请确认这个节点本来就该挂在**主管图**上（而不是别的图）。
-#   2. 它仍然**未被接入任何图**，M1 才接。
+#   1. 我删掉了 `make_furina_node` 工厂，改成模块级 `chat_llm` —— 与 coder.py 的
+#      `llm_with_tools` 保持一致（测试 monkeypatch 也沿用同一手法）。原来那个工厂
+#      全项目无人调用。
+#   2. `prepare_node` 每次都用 `task_input` 重新组消息，不读主管的 `messages`：
+#      本阶段没有跨轮记忆（Memory Service 属非目标），别把它当成"忘了加历史"。
+#   3. 人设为空时给了一句兜底 system prompt。M1 填好 furina.txt 后应删掉兜底。
 
 from __future__ import annotations
 
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
-from furina_desktop.agent.state import SupervisorState
+from furina_desktop.agent.dependencies import message_text
+from furina_desktop.agent.llm import llm
+from furina_desktop.agent.prompts.loader import aload_prompt, available
+from furina_desktop.agent.state import ChatState
+
+# 测试注入点：与 coder_mod.llm_with_tools 同一手法（模块级变量，调用时读取）。
+chat_llm = llm
+
+_FALLBACK_PERSONA = "你是芙宁娜。用中文自然地回答，不要提到自己是语言模型。"
 
 
-def make_furina_node(llm: ChatOpenAI):
-    """工厂：把 llm 闭包进节点函数。
+async def prepare_node(state: ChatState) -> dict:
+    """组消息：人设（可选）+ 本次请求。
 
-    ⚠️ 为什么用工厂而不是模块级单例：LangGraph 的节点函数**只能收 `state`**，
-       所以依赖必须靠闭包注入。这与 `coder.py` 用模块级 `llm_with_tools`
-       的做法不同 —— 两种都行，但闭包更容易测试（可以注入假 llm）。
+    TODO: [M1-1] 人设接 `knowledge/persona/`（32 文件 / 125 KB，目前无代码读取）
     """
+    persona = (await aload_prompt("furina")).strip() if "furina.txt" in available() else ""
+    messages: list = [SystemMessage(persona or _FALLBACK_PERSONA)]
+    messages.append(HumanMessage((state.task_input or "").strip()))
+    return {"chat_messages": messages}
 
-    async def furina_chat_node(state: SupervisorState):
-        """这个节点只负责一件事 —— 与模型交互。
 
-        TODO: [M1-1] 拼 system prompt（人设 + 用户画像）
-        TODO: [M1-2] 按 `state.mode` 选能力清单（roleplay 不挂工具）
-        """
-        response = await llm.ainvoke(state.messages)
-        return {"messages": [response]}
+async def model_node(state: ChatState) -> dict:
+    """调用模型。
 
-    return furina_chat_node
+    ⚠️ 这里写的是 `ainvoke`，但 token 仍会流到 SSE —— LangGraph 挂了 v2 流式回调，
+       ChatOpenAI 实现了 `_astream`，所以 `ainvoke` 内部会走流式桥（实测见
+       docs/audit/2026-10-26-StageA-Phase0-核对报告.md §R4）。
+       换句话说：**这里的 ainvoke 不影响流式**，别为了"要流式"去改写成 astream。
+    """
+    reply = await chat_llm.ainvoke(state.chat_messages)
+    return {"chat_messages": [reply], "result": message_text(reply)}
+
+
+def build_chat(*, prepare=prepare_node, model=model_node) -> CompiledStateGraph:
+    builder = StateGraph(ChatState)
+    builder.add_node("prepare_node", prepare)
+    builder.add_node("model_node", model)
+    builder.add_edge(START, "prepare_node")
+    builder.add_edge("prepare_node", "model_node")
+    builder.add_edge("model_node", END)
+    return builder.compile()
+
+
+chat_graph = build_chat()

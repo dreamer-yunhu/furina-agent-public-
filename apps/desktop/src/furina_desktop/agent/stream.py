@@ -42,7 +42,17 @@ logger = logging.getLogger(__name__)
 EVENT_TYPES = ("token", "tool_start", "tool_end", "approval_required", "error", "done")
 
 # 一次 run 只要跨进子图，就带 namespace；空 namespace = 根图（主管）。
-_AGENT_BY_NODE = {"coder_graph": "coder"}
+# <- AI 改动（Stage A）：补 chat 的归属。没登记的子图会回落成"节点名前缀"（见 _agent_of），
+#    前端就会收到 agent="chat_graph" 这种不稳定值。新增子图必须在此登记。
+_AGENT_BY_NODE = {"coder_graph": "coder", "chat_graph": "chat"}
+
+# <- AI 新增（Stage A · D-SUP-08）：主管自身节点（意图识别等）产生的 token **不下发**。
+#    实测依据：LangGraph 挂了 v2 流式回调，ChatOpenAI 实现了 `_astream`，
+#    所以哪怕节点里写的是 `ainvoke`，也会吐 AIMessageChunk
+#    （docs/audit/2026-10-26-StageA-Phase0-核对报告.md §R4）。
+#    复核重点：这是**黑名单**不是白名单 —— 只挡住 supervisor，未来新增用户可见子图
+#    不用改这里就能流式；代价是新加的主管节点若忘了归类，会漏 token。
+_TOKEN_DENY_AGENTS = frozenset({"supervisor"})
 
 
 class DecisionMismatch(Exception):
@@ -154,8 +164,12 @@ async def _stream_graph(
                     })
                 elif isinstance(message, AIMessageChunk):
                     # 纯 token 流。空 chunk（工具调用结束时的收尾帧）不发给前端。
-                    if isinstance(message.content, str) and message.content:
-                        yield _sse({"type": "token", "agent": agent, "content": message.content})
+                    if not (isinstance(message.content, str) and message.content):
+                        continue
+                    # <- AI 改动（Stage A）：主管内部输出不泄漏（D-SUP-08）。
+                    if agent in _TOKEN_DENY_AGENTS:
+                        continue
+                    yield _sse({"type": "token", "agent": agent, "content": message.content})
                 # 其余（HumanMessage / 完整 AIMessage）是回放或内部消息，不下发。
 
             elif mode == "updates":
@@ -197,11 +211,32 @@ async def _stream_graph(
         yield _sse({"type": "done", "status": "failed"})
         return
 
-    # 正常返回有两种语义：跑完了 / 停在中断。只能问 checkpointer。
+    # 正常返回有三种语义：跑完了 / 停在中断 / 路由失败。只能问 checkpointer + 最终状态。
+    # <- AI 改动（Stage A · D-SUP-06）：原来只有 interrupted / completed 两种，
+    #    于是"图跑到 END 但业务上路由失败"会被记成 COMPLETED（Task 被错误标记成功）。
+    #    现在读主管写的 route_status 业务态 —— 它与 T23 生命周期状态是**两个层次**，
+    #    不要用 CHAT/CODE 或"到达 END"代替它。
     snapshot = await graph.aget_state(config)
-    status = "interrupted" if snapshot.interrupts else "completed"
-    await _notify_finished(on_finished, status)
-    yield _sse({"type": "done", "status": status})
+    values = snapshot.values if isinstance(snapshot.values, dict) else {}
+
+    if snapshot.interrupts:
+        status = "interrupted"
+        await _notify_finished(on_finished, status)
+        yield _sse({"type": "done", "status": status})
+        return
+
+    if values.get("route_status") == "failed":
+        await _notify_finished(on_finished, "failed")
+        yield _sse({
+            "type": "error",
+            "code": "route_failed",
+            "message": values.get("route_error") or "意图无法路由到当前支持的路径",
+        })
+        yield _sse({"type": "done", "status": "failed"})
+        return
+
+    await _notify_finished(on_finished, "completed")
+    yield _sse({"type": "done", "status": "completed"})
 
 
 def _interrupt_frames(interrupts, agent: str, seen: set[str]):
@@ -253,15 +288,21 @@ async def agent_stream(
         yield _sse({"type": "done", "status": "interrupted"})
         return
 
-    # ── AI 改动：显式给 mode / subagent_task（T3）。 ──
-    # 目前主管图只挂了 coder 子图，所以 mode 固定 code；
-    # 主管图的 route_node 接好后，这里应该从配置或请求里取。
+    # ── AI 改动（Stage A · D-SUP-04 / D-SUP-05）──
+    # 不再传 `mode`（已删除）也不再直传 `subagent_task`：入口只负责给**权威输入**
+    # `task_input`，由 validate_intent_node 按意图显式映射到子图字段。
+    # 复核重点：如果哪天有人在这里加回 subagent_task，等于绕过意图路由的映射层。
     graph_input = {
         "messages": [{"role": "user", "content": inform.user_input}],
-        "mode": "code",
-        "subagent_task": inform.user_input,
+        "task_input": inform.user_input,
         "task_id": str(run.task_id),
         "execution_id": str(run.execution_id),
+        # <- AI 改动（核验修正）：按 run 重置重试计数。
+        #    intent_attempts 会被 intent_node 累加，而 LangGraph 把输入**合并**进已有 state：
+        #    同一个 graph_thread_id 再跑一次，计数会从上一轮继续 → 重试预算被吃掉。
+        #    生产上每次 run 都是新 execution / 新 thread，本来不会撞上；但
+        #    `smoke_coder_isolation` 这类"同一 thread 跑三轮"的用法会。显式归零最省事。
+        "intent_attempts": 0,
     }
     async for frame in _stream_graph(
         graph=graph,

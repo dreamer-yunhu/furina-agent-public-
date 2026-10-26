@@ -162,6 +162,26 @@ async def build_write_review(*,tool_call, workspace_root)-> WritePreview:
         diff=diff
     )
 
+# <- AI 新增（Stage A）：模型消息 → 纯文本。
+#    原因：OpenAI 兼容端点在多模态/分块场景下 content 可能是 list[dict]，
+#    直接 `str(content)` 会得到 "['text']" 这种垃圾，进而污染 result 与意图解析。
+#    复核重点：只取 "text" 块；其它块（图片等）本阶段用不到，不要偷偷 stringify。
+def message_text(message) -> str | None:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        text = "".join(parts).strip()
+        return text or None
+    return None
+
+
 async def build_tool_messages(tc:dict,
                         content:str="调用工具失败，请求工具数量和传入工具数量不符！"
                         )->ToolMessage:

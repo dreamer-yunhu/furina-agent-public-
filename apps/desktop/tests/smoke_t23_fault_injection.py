@@ -143,6 +143,8 @@ def new_thread(client) -> str:
 
 
 def run_risky(client, coder_mod, model, *, title="fault"):
+    from _t23_testkit import install_intent  # Stage A：主管意图节点也要替身
+    install_intent("CODE")
     coder_mod.llm_with_tools = model
     thread_id = new_thread(client)
     r = client.post("/agent", json={"user_input": "write", "chat_thread_id": thread_id})

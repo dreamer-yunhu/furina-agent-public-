@@ -110,6 +110,8 @@ def main() -> None:
     settings.sandbox_root = box
     read_file_tool.root_dir = str(box)
     write_file_tool.root_dir = str(box)
+    from _t23_testkit import install_intent  # Stage A：主管意图节点也要替身
+    install_intent("CODE")
     coder_mod.llm_with_tools = FakeStream()
 
     app = create_app()

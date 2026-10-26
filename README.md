@@ -39,9 +39,10 @@ uv run --package furina-desktop python -m furina_desktop
 | coder 子图 ReAct 循环 | ✅ 已实现 |
 | HITL 审批（interrupt / resume） | ✅ 图内链路已通，有冒烟脚本 |
 | 桌面 checkpoint（SQLite） | ✅ 已落地 |
-| 主管图业务节点（画像/路由/RAG/生成/持久化） | ⚠️ 仍是 `NotImplementedError` |
-| HTTP 流式桥（`POST /agent`） | ❌ `agent_stream` 未实现，当前必 500 |
-| 审批恢复入口（`/agent/resume`） | ❌ 仍是 `pass` |
+| 主管图意图路由（CHAT / CODE） | ✅ 2026-10-26（Stage A）：模型产出 + 程序校验 + 有上限重试 |
+| 主管图业务节点（画像/RAG/生成/持久化） | ⚠️ 仍是 `NotImplementedError`（非目标） |
+| HTTP 流式桥（`POST /agent`） | ✅ 已实现（`subgraphs=True`，主管内部 token 不下发） |
+| 审批恢复入口（`/agent/resume`） | ✅ 已实现（T23 链路，404/409 三判据） |
 | 前端 | ❌ 脚手架 |
 
 ## 必读文档

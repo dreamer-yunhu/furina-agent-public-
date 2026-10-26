@@ -25,6 +25,7 @@ from furina_core.config import settings  # noqa: E402
 import furina_desktop.agent.nodes.coder as coder_mod  # noqa: E402
 from furina_desktop.agent.build import build_graph  # noqa: E402
 from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
+from _t23_testkit import install_intent  # noqa: E402  Stage A：主管意图节点也要替身
 
 PASS, FAIL = "PASS", "FAIL"
 _results: list[tuple[str, bool]] = []
@@ -76,12 +77,15 @@ async def main() -> None:
         AIMessage(content="done-C"),                                   # 第 3 轮：直接结束
     ])
     coder_mod.llm_with_tools = fake
+    install_intent("CODE")  # <- AI 改动（Stage A）：测试不联网
     graph = build_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "t13-isolation"}}
 
     async def run(task: str) -> None:
+        # <- AI 改动（Stage A）：入口只给 task_input，意图 → 子图字段由校验节点映射
         await graph.ainvoke(
-            {"messages": [HumanMessage(content=task)], "mode": "code", "subagent_task": task},
+            {"messages": [HumanMessage(content=task)], "task_input": task,
+             "intent_attempts": 0},
             config,
         )
 
@@ -106,6 +110,12 @@ async def main() -> None:
     # 第 3 轮第一次调用 = inputs[3]
     third_first = fake.inputs[3]
     check("round 3 starts clean", humans(third_first) == ["task C"], str(humans(third_first)))
+
+    # <- AI 新增（核验回归）：同一 thread 跑三轮，意图重试计数必须每轮归零。
+    #    不归零的话第 3 轮一开始就吃掉 2 次预算，非法输出的重试会直接失效。
+    snap = await graph.aget_state(config)
+    check("intent_attempts reset per run", (snap.values or {}).get("intent_attempts") == 1,
+          str((snap.values or {}).get("intent_attempts")))
     check("round 3 sees neither A nor B",
           not has_text(third_first, "task A") and not has_text(third_first, "task B"))
 

@@ -51,6 +51,7 @@ from furina_desktop.agent.runtime import (  # noqa: E402
 import furina_desktop.agent.nodes.coder as coder_mod  # noqa: E402
 from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
 from furina_desktop.storage.local_store import SqliteCheckpointStore  # noqa: E402
+from _t23_testkit import install_intent  # noqa: E402  Stage A：主管意图节点也要替身
 
 PASS, FAIL = "PASS", "FAIL"
 _results: list[tuple[str, bool]] = []
@@ -130,6 +131,7 @@ async def main() -> None:
     write_file_tool.root_dir = str(box)
 
     engine, factory, store, runtime, thread_id, user_id = await make_env(tmp)
+    install_intent("CODE")  # <- AI 改动（Stage A）：测试不联网
     graph = build_graph(store)
     try:
         print("=== 1. 安全工具：运行收尾为 COMPLETED，无审批行 ===")
@@ -142,8 +144,7 @@ async def main() -> None:
         await graph.ainvoke(
             {
                 "messages": [HumanMessage(content="read")],
-                "mode": "code",
-                "subagent_task": "read",
+                "task_input": "read",
                 "task_id": str(run.task_id),
                 "execution_id": str(run.execution_id),
             },
@@ -170,8 +171,7 @@ async def main() -> None:
         await graph.ainvoke(
             {
                 "messages": [HumanMessage(content="write")],
-                "mode": "code",
-                "subagent_task": "write",
+                "task_input": "write",
                 "task_id": str(run2.task_id),
                 "execution_id": str(run2.execution_id),
             },
@@ -256,8 +256,7 @@ async def main() -> None:
         await graph.ainvoke(
             {
                 "messages": [HumanMessage(content="two writes")],
-                "mode": "code",
-                "subagent_task": "two writes",
+                "task_input": "two writes",
                 "task_id": str(run3.task_id),
                 "execution_id": str(run3.execution_id),
             },
@@ -305,8 +304,7 @@ async def main() -> None:
         await graph.ainvoke(
             {
                 "messages": [HumanMessage(content="write c")],
-                "mode": "code",
-                "subagent_task": "write c",
+                "task_input": "write c",
                 "task_id": str(run4.task_id),
                 "execution_id": str(run4.execution_id),
             },
@@ -357,8 +355,7 @@ async def main() -> None:
         await graph.ainvoke(
             {
                 "messages": [HumanMessage(content="two writes")],
-                "mode": "code",
-                "subagent_task": "two writes",
+                "task_input": "two writes",
                 "task_id": str(run5.task_id),
                 "execution_id": str(run5.execution_id),
             },

@@ -14,6 +14,7 @@
     4. 恢复：tool_end + 最终 token + done=completed + 文件真的落盘
     5. 非挂起线程 resume → not_suspended
     6. 决定与待审项不匹配 → decision_mismatch，且图仍挂起
+    7. SupervisorState 的 mode 已删除、intent 无默认值（Stage A 反向断言）
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ from furina_desktop.agent.stream import (  # noqa: E402
 )
 from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
 from furina_desktop.api.contracts import AgentRequest  # noqa: E402
-from _t23_testkit import config_for, make_runtime, new_thread  # noqa: E402
+from _t23_testkit import config_for, install_intent, make_runtime, new_thread  # noqa: E402
 from furina_desktop.agent.runtime import DecisionInput  # noqa: E402
 
 PASS, FAIL = "PASS", "FAIL"
@@ -140,6 +141,7 @@ async def collect(gen) -> list[dict]:
 async def main() -> None:
     box = make_box()
     coder_mod.llm_with_tools = FakeStream()
+    install_intent("CODE")  # <- AI 改动（Stage A）：测试不联网
     graph = build_graph(InMemorySaver())
     engine, factory, runtime, user_id = await make_runtime(
         ROOT / "_smoke_tmp" / "stream_bridge_db", sandbox=box
@@ -265,11 +267,15 @@ async def main() -> None:
     except DecisionMismatch:
         check("duplicate decisions rejected", True)
 
-    # ═══ 6. mode 默认值（T3） ═══
-    print("\n=== 6. T3 mode default ===")
+    # ═══ 6. mode 已迁移为 intent（Stage A · D-SUP-04） ═══
+    # <- AI 改动（Stage A）：原断言是 "mode 有默认值 code"，那是 T3 的临时补丁。
+    #    现在 mode 被删除，路由权威位是 intent。这里改成**反向断言**：
+    #    谁要是把 mode 加回来，这条会先红。
+    print("\n=== 6. mode removed / intent routed (Stage A) ===")
     from furina_desktop.agent.state import SupervisorState
-    check("SupervisorState.mode has default", SupervisorState.model_fields["mode"].default == "code",
-          str(SupervisorState.model_fields["mode"].default))
+    check("SupervisorState.mode removed", "mode" not in SupervisorState.model_fields)
+    check("intent has no default", SupervisorState.model_fields["intent"].default is None,
+          str(SupervisorState.model_fields["intent"].default))
 
     from furina_desktop.agent.runtime import set_runtime
     set_runtime(None)

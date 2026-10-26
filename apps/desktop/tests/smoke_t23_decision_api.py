@@ -181,10 +181,12 @@ def main() -> None:
     import furina_desktop.agent.nodes.coder as coder_mod  # noqa: E402
     from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
     from furina_desktop.main import create_app  # noqa: E402
+    from _t23_testkit import install_intent  # noqa: E402  Stage A
 
     settings.sandbox_root = box
     read_file_tool.root_dir = str(box)
     write_file_tool.root_dir = str(box)
+    install_intent("CODE")
     coder_mod.llm_with_tools = FakeStream()
 
     db = workdir / "data" / "furina.db"

@@ -33,7 +33,7 @@ from furina_core.task.enums import ApprovalStatus  # noqa: E402
 import furina_desktop.agent.nodes.coder as coder_mod  # noqa: E402
 from furina_desktop.agent.build import build_graph  # noqa: E402
 from furina_desktop.agent.tools.registry import read_file_tool, write_file_tool  # noqa: E402
-from _t23_testkit import config_for, make_runtime, new_thread, run_input  # noqa: E402
+from _t23_testkit import config_for, install_intent, make_runtime, new_thread, run_input  # noqa: E402
 from furina_desktop.agent.runtime import DecisionInput  # noqa: E402
 import uuid  # noqa: E402
 
@@ -90,6 +90,7 @@ async def start_pending(thread: str, file_path: str, text: str):
                        "args": {"file_path": file_path, "text": text},
                        "id": "call_t14"}])
     coder_mod.llm_with_tools = fake
+    install_intent("CODE")  # <- AI 改动（Stage A）：测试不联网
     graph = build_graph(InMemorySaver())
     thread_id = await new_thread(_factory, _user_id, thread)
     run = await _runtime.start_run(thread_id=thread_id, instruction="写入")

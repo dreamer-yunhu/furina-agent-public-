@@ -272,6 +272,27 @@ cd C:\furina-agent
 > 原 `AI-CHANGES.md` 的职责并入本节；完整历史见 git。
 > 新增改动请追加到本表，并写明**复核重点**。
 
+### 2026-10-26 · Stage A：主管图接入（CHAT / CODE 路由）
+
+> 依据：`docs/audit/2026-10-26-StageA-Phase0-核对报告.md`，实施报告见
+> `docs/audit/2026-10-26-StageA-实施报告.md`。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `agent/state.py` | 删 `mode`；新增 `task_input` / `intent` / `intent_raw` / `intent_error` / `intent_attempts` / `route_status` / `route_error` / `result`；新增 `ChatState`；`CoderState` 加 `result` | ① `mode` 删了不会报错（Pydantic 忽略未知字段），别照抄旧调用；② `intent` 只能由校验节点写 |
+| `agent/contracts.py` | 新增 `Intent` 枚举 + `SUPPORTED_INTENTS` | 新增成员 = 新增图路径，必须同步 `supervisor._GOTO` 与 `build.py` |
+| `agent/nodes/supervisor.py` | **新建**：`intent_node` / `validate_intent_node` / `route_failed_node` + `_parse_intent` | ① 意图输出只进 `intent_raw`，绝不进 `messages`；② "格式非法"可重试、"合法不支持"不重试；③ 失败节点不碰数据库 |
+| `agent/nodes/chat.py` | 重写为 CHAT 子图（`ChatState` + `chat_messages` + `result`）；删掉无人调用的 `make_furina_node` | ① 不挂工具、不需要审批；② `ainvoke` 不影响流式（LangGraph 会强制走 `_astream`） |
+| `agent/nodes/coder.py` | 新增 `finish_node` 写 `result`；`should_continue` 末态改指 `finish_node` | 只搬运文本，不调模型、不碰库；审批中断时不会走到这里 |
+| `agent/build.py` | 装配 `START → intent → validate →（chat / coder / failed）→ END`；删除 `route_node`/`route_edge` 占位 | 子图节点名同时被 `stream._AGENT_BY_NODE` 与 `supervisor._GOTO` 引用，改名要同步两处 |
+| `agent/stream.py` | 入口改传 `task_input`（不再传 `mode`/`subagent_task`）；补 `chat` 归属；主管 token 黑名单；收尾读 `route_status` 判 failed；**按 run 重置 `intent_attempts`** | ① 黑名单只挡 `supervisor`；② 收尾必须区分 interrupted / failed / completed 三种；③ 不重置计数会让重试预算跨 run 累积（核验 F1） |
+| `agent/llm.py` | 新增 `supervisor_llm`（`disable_streaming=True`） | 不要改成复用 `llm`，否则意图 token 重新可流式 |
+| `agent/dependencies.py` | 新增 `message_text()`（content 可能是 list[dict]） | 只取 `text` 块，别 stringify 整个结构 |
+| `agent/prompts/intent.txt` | **新建**：意图分类提示词（只输出 JSON） | 拿不准时判 CHAT（闲聊无副作用）；不要接 `supervisor.txt`（那是元提示词） |
+| `apps/desktop/tests/smoke_supervisor_route.py` | **新建**：路由 / 重试 / 不支持 / 契约边界 33 条 | 断言看最终图状态，不看节点返回值 |
+| `apps/desktop/tests/smoke_supervisor_stream.py` | **新建**：SSE 归属 + 三类失败落库 22 条 | 假模型**实现 `_astream`** 才是"会漏 token"的真实条件 |
+| `_t23_testkit.py` 及 6 个既有测试 | 加 `install_intent()`、输入改 `task_input` | 所有图级测试都必须装意图替身，否则静默连网 |
+
 ### 2026-10-24 · 流式桥 + 审批恢复
 
 | 文件 | 改动 | 复核重点 |
