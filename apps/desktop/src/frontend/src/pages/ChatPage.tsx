@@ -1,80 +1,129 @@
 // ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
 // 复核重点：
-//   1. F1 不发送任何请求，也不生成模拟消息；发送按钮保持禁用。
-//   2. 输入框内容只是本地 UI 状态，刷新后不保留（符合 F1 边界）。
+//   1. 布局对齐 Codex 原型：chat-head / chat-scroll / conversation / composer。
+//   2. 本地发送只追加 Demo 消息，不调用后端。
+//   3. 欢迎页、空会话、未知会话三种状态分清。
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-import { EmptyState } from '../components/ui/EmptyState'
-import { Notice } from '../components/ui/Notice'
-import { PageHeader } from '../components/ui/PageHeader'
-import { Panel } from '../components/ui/Panel'
+import { Link } from '../app/Link'
+import { getDemoMessages, getDemoThread, demoThreads } from '../demo/data'
+import type { DemoMessage } from '../demo/types'
+import { Composer } from '../features/chat/Composer'
+import { ConversationHeader } from '../features/chat/ConversationHeader'
+import { MessageList } from '../features/chat/MessageList'
 
 interface ChatPageProps {
   threadId?: string
 }
 
 export function ChatPage({ threadId }: ChatPageProps) {
-  const [draft, setDraft] = useState('')
+  const thread = threadId ? getDemoThread(threadId) : undefined
+  const demoMessages = threadId ? getDemoMessages(threadId) : []
+  const [localMessages, setLocalMessages] = useState<DemoMessage[]>([])
+  const localId = useRef(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  const messages = [...demoMessages, ...localMessages]
+  const hasConversation = Boolean(thread) || localMessages.length > 0
+
+  useEffect(() => {
+    const node = scrollRef.current
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  }, [messages.length])
+
+  if (threadId && !thread) {
+    return (
+      <div className="chat-page">
+        <div className="chat-empty-state">
+          <span className="tag">Demo 数据</span>
+          <h1>会话不存在</h1>
+          <p>
+            当前 Demo 数据没有包含这个会话 ID：<code>{threadId}</code>
+          </p>
+          <Link className="pill-btn" to="/chat">
+            返回新会话
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
+  const handleSend = (text: string) => {
+    const index = localId.current
+    localId.current += 1
+    setLocalMessages((current) => [
+      ...current,
+      {
+        id: `local-user-${index}`,
+        role: 'user',
+        content: text,
+        at: '刚刚',
+      },
+      {
+        id: `local-system-${index}`,
+        role: 'system',
+        content:
+          'Demo：这条输入没有发送到后端，也没有进入主管图。F2 接入真实提交后才会产生 token 与工具事件。',
+        at: '刚刚',
+      },
+    ])
+  }
 
   return (
-    <div className="page">
-      <PageHeader
-        title="对话"
-        description="会话入口与流式响应区域；真实数据将在 F2/F3 接入。"
-        meta={
-          threadId ? (
-            <span className="mono">thread: {threadId}</span>
+    <div className="chat-page">
+      <ConversationHeader thread={thread} threadId={threadId} />
+
+      <div className="chat-scroll" ref={scrollRef}>
+        <div className="conversation">
+          {hasConversation ? (
+            messages.length ? (
+              <MessageList messages={messages} />
+            ) : (
+              <div className="chat-empty-state chat-empty-state--inline">
+                <h2>这个会话还没有消息</h2>
+                <p>在下方输入框发送第一条消息（Demo 模式，不会调用后端）。</p>
+              </div>
+            )
           ) : (
-            <span className="muted">尚未创建会话</span>
-          )
-        }
-      />
+            <div className="chat-welcome">
+              <div className="chat-welcome__mark" aria-hidden="true">
+                芙
+              </div>
+              <h2>今天想做什么？</h2>
+              <p>
+                这是一个 Codex 风格的工作台 Demo。会话、工具调用与审批卡片均为本地演示数据，
+                不会调用真实 Agent。
+              </p>
+              <div className="chat-welcome__suggestions">
+                {demoThreads.slice(0, 3).map((item) => (
+                  <Link
+                    key={item.id}
+                    className="suggestion-chip"
+                    to={`/chat/${item.id}`}
+                  >
+                    <span>{item.title}</span>
+                    <span className="suggestion-chip__meta">
+                      {item.updatedAt}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
 
-      <div className="chat-layout">
-        <Panel
-          title="消息"
-          description="F1 只建立骨架，不显示任何模拟对话。"
-          className="chat-layout__messages"
-        >
-          <EmptyState
-            title="还没有消息"
-            description="会话历史查询尚未实现（后端缺口见 F0 审计 P0-2）。"
-            hint="F2 接入 POST /agent 与 SSE 后，这里显示真实的 token、工具事件与审批通知。"
-          />
-        </Panel>
+          {hasConversation ? (
+            <div className="demo-note">
+              ⓘ Demo 模式：审批操作仅改变本地演示状态，不会调用后端，也不会真正执行工具。
+            </div>
+          ) : null}
+        </div>
+      </div>
 
-        <Panel
-          title="输入"
-          description="任务提交与 SSE 尚未接线。"
-          className="chat-layout__composer"
-        >
-          <label className="field">
-            <span className="field__label">消息</span>
-            <textarea
-              className="field__input"
-              rows={4}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder="F1 暂不发送；F2 接入真实任务提交。"
-            />
-          </label>
-
-          <div className="form-actions">
-            <button type="button" className="button button--primary" disabled>
-              发送（F2 接入）
-            </button>
-            <span className="form-actions__hint">
-              当前不发起请求，也不写入本地假数据。
-            </span>
-          </div>
-
-          <Notice tone="info" title="契约缺口">
-            提交入口是 <code>POST /agent</code>（SSE），当前 SSE 不回传
-            <code>task_id</code> / <code>execution_id</code>。F2 先冻结标识回传方式，
-            再实现真实发送。
-          </Notice>
-        </Panel>
+      <div className="composer-wrap">
+        <Composer onSend={handleSend} />
       </div>
     </div>
   )

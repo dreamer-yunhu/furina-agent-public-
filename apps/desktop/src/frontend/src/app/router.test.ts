@@ -40,6 +40,21 @@ describe('matchPath', () => {
     expect(match.params.approvalRequestId).toBe('approval-1')
   })
 
+  it('matches the audit pages', () => {
+    expect(matchPath('/audit').name).toBe('audit')
+
+    const thread = matchPath('/audit/thread-1')
+    expect(thread.name).toBe('audit-thread')
+    expect(thread.params.threadId).toBe('thread-1')
+
+    const detail = matchPath('/audit/thread-1/approval-1')
+    expect(detail.name).toBe('audit-detail')
+    expect(detail.params).toEqual({
+      threadId: 'thread-1',
+      approvalId: 'approval-1',
+    })
+  })
+
   it('ignores query strings and trailing slashes', () => {
     expect(matchPath('/tasks?status=PENDING').name).toBe('tasks')
     expect(matchPath('/tasks/').name).toBe('tasks')

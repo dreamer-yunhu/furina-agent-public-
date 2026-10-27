@@ -46,4 +46,21 @@ describe('WorkbenchLayout', () => {
       'closed',
     )
   })
+
+  it('marks the sidebar collapsed when requested', () => {
+    const { container } = render(
+      <WorkbenchLayout
+        header={<span>HEADER</span>}
+        sidebar={<span>SIDEBAR</span>}
+        sidebarCollapsed
+      >
+        <span>MAIN</span>
+      </WorkbenchLayout>,
+    )
+
+    expect(container.querySelector('.workbench')).toHaveAttribute(
+      'data-sidebar',
+      'collapsed',
+    )
+  })
 })

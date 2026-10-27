@@ -15,6 +15,9 @@ export type RouteName =
   | 'execution-detail'
   | 'approvals'
   | 'approval-detail'
+  | 'audit'
+  | 'audit-thread'
+  | 'audit-detail'
   | 'settings'
   | 'not-found'
 
@@ -40,6 +43,9 @@ const ROUTES: RoutePattern[] = [
   },
   { name: 'approvals', segments: ['approvals'] },
   { name: 'approval-detail', segments: ['approvals', ':approvalRequestId'] },
+  { name: 'audit', segments: ['audit'] },
+  { name: 'audit-thread', segments: ['audit', ':threadId'] },
+  { name: 'audit-detail', segments: ['audit', ':threadId', ':approvalId'] },
   { name: 'settings', segments: ['settings'] },
 ]
 
@@ -50,6 +56,9 @@ export const ROUTE_TITLES: Record<RouteName, string> = {
   'execution-detail': '执行详情',
   approvals: '审批',
   'approval-detail': '审批详情',
+  audit: '审计',
+  'audit-thread': '线程审计',
+  'audit-detail': '审批记录',
   settings: '设置',
   'not-found': '页面不存在',
 }

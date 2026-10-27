@@ -2,7 +2,8 @@
 // 复核重点：
 //   1. 布局只负责尺寸、定位、滚动区域；不读取任何业务状态。
 //   2. 插槽全部通过 props 注入 —— 换美术时只替换插槽内容，不改本文件。
-//   3. Inspector 是否占列由 `inspectorOpen` 决定，窄屏下由 CSS 改成浮层。
+//   3. Inspector 是否占列由 `inspectorOpen` 决定；窄屏由 CSS 改成浮层。
+//   4. `mainMode='fixed'` 供会话页使用：主区域不滚动，由页面内部消息区滚动。
 
 import type { ReactNode } from 'react'
 
@@ -19,6 +20,9 @@ interface WorkbenchLayoutProps {
   children: ReactNode
   inspector?: ReactNode
   inspectorOpen?: boolean
+  onCloseInspector?: () => void
+  sidebarCollapsed?: boolean
+  mainMode?: 'scroll' | 'fixed'
   background?: ReactNode
   character?: ReactNode
 }
@@ -29,17 +33,27 @@ export function WorkbenchLayout({
   children,
   inspector,
   inspectorOpen = false,
+  onCloseInspector,
+  sidebarCollapsed = false,
+  mainMode = 'scroll',
   background,
   character,
 }: WorkbenchLayoutProps) {
   return (
-    <div className="workbench" data-inspector={inspectorOpen ? 'open' : 'closed'}>
+    <div
+      className="workbench"
+      data-inspector={inspectorOpen ? 'open' : 'closed'}
+      data-sidebar={sidebarCollapsed ? 'collapsed' : 'expanded'}
+      data-main-mode={mainMode}
+    >
       <BackgroundSlot>{background}</BackgroundSlot>
       <CharacterSlot>{character}</CharacterSlot>
       <HeaderSlot>{header}</HeaderSlot>
       <SidebarSlot>{sidebar}</SidebarSlot>
       <MainWorkspaceSlot>{children}</MainWorkspaceSlot>
-      {inspectorOpen ? <InspectorSlot>{inspector}</InspectorSlot> : null}
+      {inspectorOpen ? (
+        <InspectorSlot onClose={onCloseInspector}>{inspector}</InspectorSlot>
+      ) : null}
     </div>
   )
 }

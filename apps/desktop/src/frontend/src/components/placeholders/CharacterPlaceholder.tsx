@@ -1,5 +1,5 @@
 // ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：这是工作台内的角色槽位占位，不是独立角色窗口。
+// 复核重点：角色入口保持小巧，不占用中央工作区；独立窗口属于 F4。
 
 interface CharacterPlaceholderProps {
   src?: string
@@ -7,18 +7,12 @@ interface CharacterPlaceholderProps {
 
 export function CharacterPlaceholder({ src }: CharacterPlaceholderProps) {
   return (
-    <div className="character-placeholder">
+    <div className="character-avatar" title="角色窗口占位 · 独立窗口在 F4 评估">
       {src ? (
-        <img className="character-placeholder__image" src={src} alt="" />
+        <img className="character-avatar__image" src={src} alt="角色" />
       ) : (
-        <div className="character-placeholder__frame" aria-hidden="true">
-          F4
-        </div>
+        <span aria-hidden="true">芙</span>
       )}
-      <div className="character-placeholder__copy">
-        <strong>角色槽位</strong>
-        <span>独立窗口 / Live2D 在 F4 评估</span>
-      </div>
     </div>
   )
 }

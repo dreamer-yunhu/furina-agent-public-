@@ -1,79 +1,128 @@
 /* ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ── */
-/* 语义主题：业务组件只使用这里的变量，不直接使用 tokens.css 的原始色。 */
+/* 语义主题：组件只使用这里的变量。默认浅色，跟随系统/深色可选。 */
 
 :root {
   color-scheme: light;
 
-  --color-bg: var(--color-neutral-25);
-  --color-surface: var(--color-neutral-0);
-  --color-surface-muted: var(--color-neutral-50);
-  --color-text: var(--color-neutral-900);
-  --color-text-muted: var(--color-neutral-500);
-  --color-border: var(--color-neutral-100);
-  --color-border-strong: var(--color-neutral-300);
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --sidebar: #f1f1f2;
+  --line: #e5e5e7;
+  --line-strong: #d8d9de;
+  --text: #202124;
+  --text-secondary: #52555d;
+  --muted: #747780;
 
-  --color-accent: var(--color-blue-500);
-  --color-accent-contrast: var(--color-neutral-0);
-  --color-accent-soft: rgb(37 99 235 / 8%);
-  --color-accent-border: rgb(37 99 235 / 25%);
+  --blue: #2563eb;
+  --blue-soft: #eef4ff;
+  --blue-border: #d6e2fb;
+  --green: #16845b;
+  --green-soft: #effaf4;
+  --green-border: #cbe9d7;
+  --amber: #a86209;
+  --amber-soft: #fff8eb;
+  --amber-border: #f3dfb9;
+  --red: #bd4148;
+  --red-soft: #fff0f0;
+  --red-border: #f2d3d5;
 
-  --color-danger: var(--color-red-500);
-  --color-warning: var(--color-amber-500);
-  --color-warning-soft: rgb(217 119 6 / 10%);
-  --color-warning-border: rgb(217 119 6 / 30%);
-  --color-success: var(--color-green-500);
+  --code-bg: #f5f6f8;
+  --user-bubble: #ededf0;
+  --bot-bg: #292b31;
+  --bot-text: #ffffff;
+  --send-bg: #25272c;
+  --send-text: #ffffff;
+  --nav-active: #e2e5eb;
+  --chip-bg: #e6e8ed;
+  --chip-text: #555a64;
+  --avatar-bg: #e7e3ff;
+  --avatar-text: #6250b5;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --color-bg: #0b1220;
-    --color-surface: #111a2c;
-    --color-surface-muted: #16213a;
-    --color-text: #e5edf9;
-    --color-text-muted: #94a3b8;
-    --color-border: #22304a;
-    --color-border-strong: #33456a;
+    --bg: #151618;
+    --panel: #1c1d20;
+    --sidebar: #18191c;
+    --line: #2c2e33;
+    --line-strong: #3a3d44;
+    --text: #e8e8e6;
+    --text-secondary: #b8bac2;
+    --muted: #9a9ca3;
 
-    --color-accent: var(--color-blue-400);
-    --color-accent-contrast: #08101f;
-    --color-accent-soft: rgb(96 165 250 / 14%);
-    --color-accent-border: rgb(96 165 250 / 35%);
+    --blue: #6ea0ff;
+    --blue-soft: #1b2740;
+    --blue-border: #2c4066;
+    --green: #48b88a;
+    --green-soft: #142a21;
+    --green-border: #24503e;
+    --amber: #e0a34a;
+    --amber-soft: #2d2417;
+    --amber-border: #4f3d22;
+    --red: #f07a80;
+    --red-soft: #2f1c1e;
+    --red-border: #563033;
 
-    --color-danger: var(--color-red-400);
-    --color-warning: var(--color-amber-400);
-    --color-warning-soft: rgb(251 191 36 / 12%);
-    --color-warning-border: rgb(251 191 36 / 32%);
-    --color-success: var(--color-green-400);
+    --code-bg: #23252a;
+    --user-bubble: #26282d;
+    --bot-bg: #e8e8e6;
+    --bot-text: #151618;
+    --send-bg: #e8e8e6;
+    --send-text: #151618;
+    --nav-active: #25272d;
+    --chip-bg: #2a2c31;
+    --chip-text: #b8bac2;
+    --avatar-bg: #2b2440;
+    --avatar-text: #b9a8ff;
 
-    --shadow-panel: 0 1px 2px rgb(0 0 0 / 35%), 0 12px 30px rgb(0 0 0 / 25%);
-    --shadow-overlay: 0 18px 48px rgb(0 0 0 / 45%);
+    --shadow-card: 0 2px 6px rgb(0 0 0 / 25%);
+    --shadow-approval: 0 10px 35px rgb(0 0 0 / 25%);
+    --shadow-composer: 0 3px 12px rgb(0 0 0 / 20%);
+    --shadow-overlay: 0 10px 30px rgb(0 0 0 / 40%);
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --color-bg: #0b1220;
-  --color-surface: #111a2c;
-  --color-surface-muted: #16213a;
-  --color-text: #e5edf9;
-  --color-text-muted: #94a3b8;
-  --color-border: #22304a;
-  --color-border-strong: #33456a;
+  --bg: #151618;
+  --panel: #1c1d20;
+  --sidebar: #18191c;
+  --line: #2c2e33;
+  --line-strong: #3a3d44;
+  --text: #e8e8e6;
+  --text-secondary: #b8bac2;
+  --muted: #9a9ca3;
 
-  --color-accent: var(--color-blue-400);
-  --color-accent-contrast: #08101f;
-  --color-accent-soft: rgb(96 165 250 / 14%);
-  --color-accent-border: rgb(96 165 250 / 35%);
+  --blue: #6ea0ff;
+  --blue-soft: #1b2740;
+  --blue-border: #2c4066;
+  --green: #48b88a;
+  --green-soft: #142a21;
+  --green-border: #24503e;
+  --amber: #e0a34a;
+  --amber-soft: #2d2417;
+  --amber-border: #4f3d22;
+  --red: #f07a80;
+  --red-soft: #2f1c1e;
+  --red-border: #563033;
 
-  --color-danger: var(--color-red-400);
-  --color-warning: var(--color-amber-400);
-  --color-warning-soft: rgb(251 191 36 / 12%);
-  --color-warning-border: rgb(251 191 36 / 32%);
-  --color-success: var(--color-green-400);
+  --code-bg: #23252a;
+  --user-bubble: #26282d;
+  --bot-bg: #e8e8e6;
+  --bot-text: #151618;
+  --send-bg: #e8e8e6;
+  --send-text: #151618;
+  --nav-active: #25272d;
+  --chip-bg: #2a2c31;
+  --chip-text: #b8bac2;
+  --avatar-bg: #2b2440;
+  --avatar-text: #b9a8ff;
 
-  --shadow-panel: 0 1px 2px rgb(0 0 0 / 35%), 0 12px 30px rgb(0 0 0 / 25%);
-  --shadow-overlay: 0 18px 48px rgb(0 0 0 / 45%);
+  --shadow-card: 0 2px 6px rgb(0 0 0 / 25%);
+  --shadow-approval: 0 10px 35px rgb(0 0 0 / 25%);
+  --shadow-composer: 0 3px 12px rgb(0 0 0 / 20%);
+  --shadow-overlay: 0 10px 30px rgb(0 0 0 / 40%);
 }

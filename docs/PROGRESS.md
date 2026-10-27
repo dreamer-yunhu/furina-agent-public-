@@ -279,6 +279,76 @@ cd C:\furina-agent
 > 原 `AI-CHANGES.md` 的职责并入本节；完整历史见 git。
 > 新增改动请追加到本表，并写明**复核重点**。
 
+### 2026-10-27 · Codex 原型移植进 React（视觉重构）
+
+> 依据：`C:\Users\l1575\Downloads\furina-codex-ui-demo.zip`（单文件静态原型）。
+> 原 HTML 保留在 `frontend/public/codex-demo.html` 供对照；React 工作台按它重构视觉层。
+> 本条取代上一条中关于旧视觉样式的描述，功能/路由仍沿用上一条。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `frontend/src/styles/{tokens,theme,demo,index}.css` | **重写**：原型配色/字体/间距/阴影；新增 `demo.css`；删除 `layout.css`、`components.css`、`pages.css` | ① 默认浅色，深色仍可用；② 字体 14px / Inter + Segoe UI 回退；③ **背景层是 fixed + z-index:0，主区域必须 z-index:1**，否则 DOM 有内容但截图空白（本轮实际踩到） |
+| `frontend/src/features/navigation/{SidebarNav,HeaderBar}.tsx` | **重写**：品牌+新建会话+工作区导航+最近会话+底部用户；顶栏面包屑+演示环境+详情面板+主题 | 顶栏不再显示真实连接状态；详情按钮只在有详情内容的路由出现 |
+| `frontend/src/features/chat/{ApprovalCard,MessageRow,ConversationHeader,Composer}.tsx` | **重写**：chat-head、user-row/msg/tool-row、approval 卡片、composer | ① 批准/拒绝只改本地状态；② 已处理默认折叠；③ 「已批准」显示「未执行 · 等待真实结果」 |
+| `frontend/src/pages/{Chat,Tasks,TaskDetail,ExecutionDetail,Audit,AuditThread,AuditApprovalDetail,Settings,NotFound}Page.tsx` | **重写**：page-title/page-content/thread-card/task-grid/records | 审计搜索/筛选/展开联动；任务为两列卡片；详情页用卡片分区 |
+| `frontend/src/pages/{Approvals,ApprovalDetail}Page.tsx` | 旧入口改为跳转 `/audit` | 路由保留，避免两套审批 UI 漂移 |
+| `frontend/src/components/ui/{StatusPill,DemoBadge,PageHeader,KeyValueList,ContentSection,PlaceholderTag}.tsx` | 改为 `.tag` / `.page-title` / `.field` / `.thread-card` 结构 | 状态色不替代文本；Demo 标识不隐藏 |
+| `frontend/src/layouts/InspectorSlot.tsx` | 改为 `.panel-head` + `.panel-content` | 关闭按钮只影响布局，不代表取消任务 |
+| `frontend/src/app/App.tsx` | HeaderBar 去掉 windowRole；ChatPage 不再传 inspector 状态；面包屑/主题由顶栏统一 | ChatPage 按 threadId 重挂载，避免本地 Demo 消息串会话 |
+| `frontend/src/hooks/useTheme.ts` | 默认 `light`（对齐原型），仍支持 system/dark | `system` 不写 data-theme；localStorage 不可用时静默降级 |
+| `frontend/public/codex-demo.html`、`codex-demo-README.md` | 保留原始静态原型 | 不是 React 入口；仅用于对照 |
+| `frontend/src/**/*.test.tsx` | 更新 24 项测试：路由/导航/侧栏折叠/详情/主题/审批卡片 | 审批测试验证「批准 ≠ 执行成功」 |
+| `docs/demo/screenshots/*.png`、`frontend/README.md` | 截图按新 React UI 重拍；README 更新视觉层说明 | 截图来自实际运行，不是设计稿 |
+
+**实测（2026-10-27）**：
+- `npm run lint` ✅（oxlint 无输出）
+- `npm run build` ✅（tsc -b + vite build，62 modules）
+- `npm run test` ✅（4 files / 24 tests）
+- Playwright（浅色、1280×800 / 1024×720 / 760×900）：无横向溢出；侧栏 244→60px；详情面板 1024 为第三列、≤950 为 300px 浮层
+- 审批：点击「批准执行」→ 折叠为「未执行 · 等待真实结果」；展开显示「等待执行」，不显示「执行成功」
+- 控制台：0 error
+- **关键缺陷修复**：`.slot--background`（fixed, z-index:0）曾盖住主区域，DOM 正常但截图/视觉为空白；已把 sidebar/main/inspector 抬到 z-index:1
+
+**未修改**：后端业务逻辑、审批状态机、数据库模型、API 契约、`src-tauri/`。
+
+**未提交**：本轮改动停留在工作区。
+
+### 2026-10-27 · Codex 风格 UI Demo（基于 F1）
+
+> 视觉层后续已按 ZIP 原型重构，见上一条；本条目保留功能/路由历史。
+> 依据：用户《Codex 风格 UI Demo 开工指南》。一句话：把 F1 空状态骨架填成
+> **可交互、可截图、明确标注 Demo 数据**的工作台；不接后端、不改审批状态机。
+> ⚠️ 参考图未被当前模型读取（不支持图像输入），本轮依据是指南文字 + Codex 公开页面布局原则。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `frontend/src/demo/types.ts`、`data.ts` | **新建**：会话/任务/Execution/审批/工具/消息的演示数据与查询函数 | ① Demo 类型不得当后端 DTO 复用；② `status` 与 `toolExecutionStatus` 分开；③ 时间用固定字符串，测试/截图可复现 |
+| `frontend/src/features/chat/{ApprovalCard,MessageList,MessageRow,ConversationHeader,Composer}.tsx` | **新建**：会话内消息流、工具事件、审批卡片、输入框 | ① 批准/拒绝只改本地状态并标注 Demo；② 已处理卡片默认折叠、可展开；③ 「已批准」必须显示「等待执行」，不能显示「执行成功」 |
+| `frontend/src/features/shared/statusMeta.ts` | **新建**：审批/工具/运行状态文案与语气 | 新增状态必须同步四套映射；审批状态与工具状态不得合并 |
+| `frontend/src/pages/{Chat,Tasks,TaskDetail,ExecutionDetail,Audit,AuditThread,AuditApprovalDetail,Settings}Page.tsx` | **重写**：Demo 会话、任务列表、审计三级导航、审批决策链、主题设置 | ① 审计以线程为顶层分组；② 任务与 Execution 历史不覆盖；③ 所有页面显示 Demo 标识 |
+| `frontend/src/features/navigation/{SidebarNav,HeaderBar}.tsx` | **重写**：最近会话、任务/审计/设置导航、侧栏折叠、详情面板、主题切换 | 侧栏折叠只隐藏文字；详情按钮只在有详情内容的路由显示 |
+| `frontend/src/features/inspector/RouteInspector.tsx` | **重写**：会话/任务/执行/审计/审批的详情摘要 | 只展示摘要，不重复中央工作区完整内容 |
+| `frontend/src/app/App.tsx`、`router.ts`、`providers/{ThemeProvider.tsx,themeContext.ts}` | 新增 `/audit`、`/audit/:threadId`、`/audit/:threadId/:approvalId`；侧栏/详情/主题状态；ChatPage 按 threadId key 重挂载 | ① 面板开关按 `match.path` 记录，换路由自动回默认；② 主题只有一份 context；③ 新路由不得破坏旧 `/approvals` |
+| `frontend/src/components/ui/{Icon,IconButton,StatusPill,DemoBadge,ContentSection}.tsx` | **新建**：内联 SVG 图标、状态胶囊、Demo 标识、分隔线式内容区块 | 不引入 UI 依赖；图标按钮必须有 aria-label；状态色不替代文本 |
+| `frontend/src/hooks/useTheme.ts`、`styles/*` | 主题读写 + Codex 风格令牌/布局/组件样式 | ① `system` 不写 `data-theme`；② 中性背景、少阴影、少圆角；③ 窄屏 Inspector 浮层、侧栏收窄 |
+| `frontend/src/components/placeholders/*` | 角色入口缩为小圆形；背景改纯色 | 角色不得占用中央工作区 |
+| `frontend/src/**/*.test.tsx`、`vitest.config.ts` | 新增/更新 24 项测试：路由、导航、侧栏折叠、详情面板、主题、审批卡片 | 只测纯前端；审批卡片测试必须验证「批准 ≠ 执行成功」 |
+| `frontend/README.md` | 更新 Demo 路由、数据边界、测试边界 | 不得把 Demo 写成真实后端能力 |
+| `docs/demo/screenshots/*.png` | **新增**：会话页、待审批卡片、审计页、审批详情截图 | 截图来自实际运行，深色主题，1920×889；非设计稿 |
+
+**实测（2026-10-27）**：
+- `npm run lint` ✅（oxlint 无输出）
+- `npm run build` ✅（tsc -b + vite build，66 modules）
+- `npm run test` ✅（4 files / 24 tests）
+- Playwright（深色、1920×889）：`#/chat/thread-lab-summary`、`#/audit`、`#/audit/thread-preflight/approval-cleanup-script` 均正常；控制台 0 error
+- 审批卡片：点击批准 → 折叠为「已批准」摘要；展开显示「等待执行」，不显示「执行成功」
+- 窄屏 760×900：无横向溢出；侧栏收窄到 68px；详情面板改为 352px 浮层
+- **未运行**：后端测试、SSE 断连、真实审批恢复、Tauri 窗口/进程测试（属于 F2–F4）
+
+**未修改**：后端业务逻辑、审批状态机、数据库模型、API 契约、`src-tauri/`。
+
+**未提交**：本轮改动停留在工作区。
+
 ### 2026-10-27 · 前端 F1：工作台骨架与美术插槽
 
 > 依据：`docs/audit/2026-10-27-前端集成F0-整合审计.md` 与用户提供的 F1 开工指南。

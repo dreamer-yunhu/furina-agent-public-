@@ -3,66 +3,84 @@
 这是**桌面壳 + 界面**，不是业务逻辑所在。Python 侧（`apps/desktop/src/furina_desktop`）
 仍然是 agent 引擎本体，监听 `127.0.0.1:8001`；本目录负责窗口、布局和会话界面。
 
-## F1 当前状态（2026-10-27）
+## 当前状态（2026-10-27）
 
-已完成：工作台骨架、hash 路由、六个布局插槽、基础页面与空状态、中性设计令牌、
-美术资源入口、路由导航测试。
+本轮在 F1 骨架上完成 **Codex 风格 UI Demo**，并按
+`furina-codex-ui-demo.zip` 中的静态原型重构了视觉层（原 HTML 保留在
+`public/codex-demo.html`，用于对照）：
+
+- 左侧可折叠侧栏：新建会话、最近会话、任务、审计、设置。
+- 中央会话工作区：消息流、工具调用状态、会话内审批卡片、输入框。
+- 审批卡片：待审批更醒目；已处理默认折叠，可展开查看决定与工具执行结果。
+- 审计页：按线程分组，线程 → 审批记录 → 审批详情三级导航。
+- 任务页：任务列表、Execution 历史、关联审批。
+- 详情面板：按需打开/关闭，窄屏改为浮层。
+- 主题：默认浅色（对齐原型），支持跟随系统 / 深色；顶栏与设置页共用同一状态。
+- 截图：`docs/demo/screenshots/`（会话页、待审批卡片、审计页、审批详情）。
+
+**Demo 数据**：所有会话、任务、审批、工具结果都来自 `src/demo/data.ts`，页面上有
+`Demo 数据` 标识。**不会调用后端，也不会触发真实工具执行。**
 
 **尚未实现（不要误读）**：
 
-- 不发送任何 HTTP 请求，不生成模拟消息/任务/审批。
-- 没有接入 `POST /agent`、SSE、审批决定或恢复执行。
-- Tauri 仍不托管 Python，没有角色窗口，没有双窗口。
-- 没有事件总线、断线重连或任务快照轮询（这些属于 F2–F4）。
+- 不发送任何 HTTP 请求，不接 `POST /agent`、SSE、审批决定或恢复执行。
+- 任务/审批查询仍无真实接口；Demo 数据不等于后端能力。
+- Tauri 仍不托管 Python，没有角色独立窗口，没有双窗口同步。
+- 没有事件总线、断线重连或快照轮询（属于 F2–F4）。
 
 ## 目录结构
 
 ```text
 frontend/
-├─ index.html                 入口 HTML（Tauri 加载 vite build 的产物）
+├─ index.html
 ├─ src/
-│  ├─ main.tsx                挂载点：只做 createRoot + 样式入口
+│  ├─ main.tsx
 │  ├─ app/
-│  │  ├─ App.tsx              路由 → 页面映射；不读业务状态
+│  │  ├─ App.tsx              路由 → 页面映射；侧栏/详情/主题 UI 状态
 │  │  ├─ router.ts            hash 路由匹配（纯函数）
-│  │  └─ Link.tsx             内部链接
-│  ├─ layouts/
-│  │  ├─ WorkbenchLayout.tsx  Header / Sidebar / Main / Inspector 网格
-│  │  ├─ HeaderSlot.tsx
-│  │  ├─ SidebarSlot.tsx
-│  │  ├─ MainWorkspaceSlot.tsx
-│  │  ├─ InspectorSlot.tsx
-│  │  ├─ BackgroundSlot.tsx
-│  │  └─ CharacterSlot.tsx
+│  │  ├─ Link.tsx
+│  │  └─ providers/           ThemeProvider + themeContext
+│  ├─ layouts/                WorkbenchLayout + 六个插槽
 │  ├─ pages/                  Chat / Tasks / TaskDetail / ExecutionDetail /
+│  │                          Audit / AuditThread / AuditApprovalDetail /
 │  │                          Approvals / ApprovalDetail / Settings / NotFound
 │  ├─ features/
-│  │  ├─ navigation/          顶栏与侧栏导航
-│  │  └─ inspector/           按路由显示详情面板
+│  │  ├─ chat/                ConversationHeader / MessageList / ApprovalCard / Composer
+│  │  ├─ navigation/          HeaderBar / SidebarNav
+│  │  ├─ inspector/           RouteInspector
+│  │  └─ shared/              statusMeta（状态文案与语气）
 │  ├─ components/
-│  │  ├─ ui/                  Panel / PageHeader / EmptyState / Notice / ...
+│  │  ├─ ui/                  Panel / ContentSection / PageHeader / StatusPill /
+│  │  │                       EmptyState / Notice / KeyValueList / Icon / IconButton
 │  │  ├─ feedback/            ConnectionStatus
-│  │  └─ placeholders/        背景与角色占位
+│  │  └─ placeholders/        背景与角色入口
+│  ├─ demo/                   types.ts + data.ts（全部演示数据）
 │  ├─ services/
-│  │  ├─ api/config.ts        API 基址（F2 的 API Client 使用；F1 只展示）
-│  │  └─ desktop/windowRoles.ts  F4 双窗口适配缝（当前未接线）
-│  ├─ styles/
-│  │  ├─ tokens.css           原始设计令牌
-│  │  ├─ theme.css            语义主题（含浅色/深色）
-│  │  ├─ layout.css           工作台网格与插槽
-│  │  ├─ components.css       通用组件
-│  │  ├─ pages.css            页面级布局
-│  │  └─ index.css            样式入口
+│  │  ├─ api/config.ts        API 基址（F2 使用；当前只展示）
+│  │  └─ desktop/windowRoles.ts  F4 双窗口适配缝（未接线）
+│  ├─ hooks/useTheme.ts       主题读写
+│  ├─ styles/                 tokens / theme / demo / index
 │  ├─ assets/app/artwork.ts   美术资源集中入口
-│  └─ test/setup.ts           测试清理
-├─ src-tauri/                 Rust 侧（Tauri 2，F1 未改）
-│  ├─ Cargo.toml
-│  ├─ src/lib.rs
-│  ├─ src/main.rs
-│  └─ tauri.conf.json         ⚠️ 窗口尺寸 / devUrl / 打包配置
-├─ vite.config.ts             ⚠️ 端口固定 1420
-└─ vitest.config.ts           测试配置（jsdom）
+│  └─ test/setup.ts
+├─ src-tauri/                 Tauri 2（本轮未改）
+├─ vite.config.ts             端口固定 1420
+└─ vitest.config.ts           jsdom 测试
 ```
+
+## Demo 路由
+
+| 路由 | 页面 |
+|---|---|
+| `#/chat` | 欢迎页 + 输入框 |
+| `#/chat/thread-lab-summary` | 会话 + 待审批卡片 |
+| `#/chat/thread-rag-recall` | 已处理审批（批准 / 拒绝） |
+| `#/chat/thread-preflight` | 「已批准但执行失败」 |
+| `#/tasks` | 任务列表 |
+| `#/tasks/task-lab-summary` | 任务详情 + Execution 历史 |
+| `#/audit` | 按线程分组的审计页 |
+| `#/audit/thread-lab-summary` | 线程内审批记录 |
+| `#/audit/thread-preflight/approval-cleanup-script` | 审批决策链 |
+| `#/settings` | 主题与连接状态 |
 
 ## 常用命令
 
@@ -72,27 +90,25 @@ cd apps\desktop\src\frontend
 npm install            # 首次
 npm run dev            # 只跑浏览器界面（不启 Tauri 窗口）
 npm run build          # tsc 类型检查 + vite 产物到 dist/
-npm run test           # vitest run（路由 + 页面导航）
+npm run test           # vitest run（路由 / 导航 / 插槽 / 审批卡片）
 npm run lint           # oxlint
 npm run tauri:dev      # 起 Tauri 窗口（会自己拉起 vite dev server）
-npm run tauri:build    # 出安装包（msi / nsis），首次会下载 WiX 与 NSIS
+npm run tauri:build    # 出安装包（msi / nsis）
 ```
 
 ## 设计约束
 
-1. **路由使用 hash**（`#/tasks`）。Tauri 生产环境从 `dist/` 加载，不能假设
-   服务端会对未知路径回退 `index.html`；hash 在 WebView 与浏览器里都稳定。
-2. **端口 1420 是写死的**：`tauri.conf.json.build.devUrl` 指向它，
-   `vite.config.ts` 用 `strictPort: true`，端口被占时直接报错而不是悄悄换端口。
-3. **`dist/` 是 `tauri build` 的前端输入**：`tauri.conf.json.build.frontendDist = "../dist"`。
-4. **布局与视觉解耦**：业务页面只使用 `Panel`、`PageHeader` 等组件；
-   颜色/间距/圆角改 `tokens.css` 与 `theme.css`，不要写死到页面组件。
-5. **美术替换入口**：`src/assets/app/artwork.ts`。没有资源时使用中性占位，
-   不要提前锁定二次元视觉或引入未授权素材。
-6. **窗口角色**：`services/desktop/windowRoles.ts` 只是 F4 的适配缝；
-   当前只有 `main` 窗口，不要宣称已支持角色独立窗口。
+1. **路由使用 hash**。Tauri 生产环境从 `dist/` 加载，不假设服务端回退 `index.html`。
+2. **布局与视觉解耦**：业务页面只用 `ContentSection`、`StatusPill` 等组件；
+   颜色/间距/圆角改 `tokens.css` 与 `theme.css`。
+3. **美术替换入口**：`src/assets/app/artwork.ts`；没有资源时使用中性占位。
+4. **Demo 数据与真实数据分离**：`src/demo/` 只服务演示；F2 接入真实 API 时另建
+   `services/api` 类型与请求层，不能直接复用 Demo 类型。
+5. **审批状态 ≠ 执行状态**：`demo/types.ts` 把 `status` 与 `toolExecutionStatus`
+   分开；UI 不得把「已批准」显示成「执行成功」。
+6. **不引入大型 UI 依赖**：图标为内联 SVG，路由为约 140 行的 hash 匹配。
 
-## 与后端的关系（F1）
+## 与后端的关系（当前）
 
 | 用途 | 端点 | 当前状态 |
 |---|---|---|
@@ -102,25 +118,26 @@ npm run tauri:build    # 出安装包（msi / nsis），首次会下载 WiX 与 
 | 审批恢复（SSE） | `POST /agent/resume` | 后端已实现；前端未接入 |
 | 任务 / 执行 / 审批查询 | — | **后端尚未实现**（见 F0 审计） |
 
-⚠️ 当前**没有**进程托管：Tauri 不会自动拉起 Python 服务，
-需要另开终端 `uv run --package furina-desktop python -m furina_desktop`。
-把后端做成 sidecar 属于 F4（见 `docs/TODO.md` T5 与
-`docs/audit/2026-10-27-前端集成F0-整合审计.md`）。
+⚠️ Tauri 仍不会自动拉起 Python 服务；需要另开终端
+`uv run --package furina-desktop python -m furina_desktop`。
 
 ## 测试边界
 
-F1 的测试只覆盖纯前端：
+当前测试只覆盖纯前端：
 
-- `src/app/router.test.ts`：hash 路由匹配、参数、未知路由。
-- `src/app/App.test.tsx`：默认页、侧栏导航、任务详情参数、404、根路径重定向。
+- `src/app/router.test.ts`：路由匹配（含审计三级路由）。
+- `src/app/App.test.tsx`：默认页、侧栏导航、审计导航、任务详情、404、根路径重定向、
+  侧栏折叠、详情面板打开。
+- `src/layouts/WorkbenchLayout.test.tsx`：插槽注入、Inspector 显隐、侧栏折叠。
+- `src/features/chat/ApprovalCard.test.tsx`：批准/拒绝、折叠、状态区分。
 
-**没有运行**的后端/集成测试：SSE 断连、任务生命周期、审批决定与恢复、Tauri 双窗口。
-这些分别属于 F2–F4，不能把 F1 的绿灯当成业务链路已验证。
+**未运行**：后端/SSE 断连、任务生命周期、真实审批恢复、Tauri 双窗口。
+这些属于 F2–F4，不能把 Demo 的绿灯当成业务链路已验证。
 
 ## 未完成的部分
 
-- 会话界面（消息列表 / 流式 token 渲染 / 审批卡片）
-- 任务、执行、审批的真实查询与轮询
-- `@tauri-apps/api` 的窗口控制、Python 进程托管
-- CSP 在 `tauri.conf.json` 里是 `null`（开发期放行），发布前必须收紧
-- 图标仍是 Tauri 默认图标
+- 真实任务、Execution、审批查询与轮询
+- 真实 SSE 提交、token 渲染、审批决定与恢复
+- 事件总线、断线重连、任务快照
+- Tauri 进程托管、角色独立窗口、双窗口同步
+- CSP 在 `tauri.conf.json` 里是 `null`，发布前必须收紧

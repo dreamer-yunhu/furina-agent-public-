@@ -14,16 +14,16 @@ interface KeyValueListProps {
 
 export function KeyValueList({ items }: KeyValueListProps) {
   return (
-    <dl className="key-value">
+    <div className="kv-list">
       {items.map((item) => (
-        <div className="key-value__row" key={item.label}>
-          <dt className="key-value__label">{item.label}</dt>
-          <dd className="key-value__value">
+        <div className="field" key={item.label}>
+          <span className="label">{item.label}</span>
+          <div>
             {item.value}
-            {item.note ? <span className="key-value__note">{item.note}</span> : null}
-          </dd>
+            {item.note ? <small className="muted"> {item.note}</small> : null}
+          </div>
         </div>
       ))}
-    </dl>
+    </div>
   )
 }

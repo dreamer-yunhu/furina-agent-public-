@@ -1,42 +1,49 @@
 // ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：任务列表接口尚未实现；这里不能放模拟行。
+// 复核重点：任务卡片对齐原型；点击进入任务详情；数据全部来自 demo/data.ts。
 
-import { EmptyState } from '../components/ui/EmptyState'
+import { Link } from '../app/Link'
 import { PageHeader } from '../components/ui/PageHeader'
-import { Panel } from '../components/ui/Panel'
-import { PlaceholderTag } from '../components/ui/PlaceholderTag'
+import { StatusPill } from '../components/ui/StatusPill'
+import { demoTasks, getDemoThread } from '../demo/data'
+import { RUN_STATUS_META } from '../features/shared/statusMeta'
 
 export function TasksPage() {
   return (
     <div className="page">
       <PageHeader
         title="任务"
-        description="任务列表、业务状态、更新时间与当前执行。"
-        meta={<PlaceholderTag label="F3 接入" />}
+        description="任务组织工作目标，执行记录保留每次运行的独立历史。"
+        meta={<span className="tag">{demoTasks.length} 个任务</span>}
       />
 
-      <Panel
-        title="任务列表"
-        description="真实数据来源：GET /agent/tasks（尚未实现）。"
-      >
-        <div className="table-placeholder" aria-hidden="true">
-          <span>任务</span>
-          <span>业务状态</span>
-          <span>更新时间</span>
+      <div className="page-content">
+        <div className="task-grid">
+          {demoTasks.map((task) => {
+            const thread = getDemoThread(task.threadId)
+            const meta = RUN_STATUS_META[task.status]
+            return (
+              <Link
+                key={task.id}
+                className="task-card"
+                to={`/tasks/${task.id}`}
+              >
+                <h3>{task.title}</h3>
+                <p>{thread?.preview ?? task.id}</p>
+                <div className="meta">
+                  <span>
+                    Execution · {task.executions.length} · 更新 {task.updatedAt}
+                  </span>
+                  <StatusPill tone={meta.tone}>{meta.label}</StatusPill>
+                </div>
+              </Link>
+            )
+          })}
         </div>
-        <EmptyState
-          title="暂无任务数据"
-          description="后端尚未提供任务查询接口，前端不生成模拟任务。"
-          hint="F2 冻结契约，F3 接入列表、抽屉与详情页。"
-        />
-      </Panel>
 
-      <Panel
-        title="筛选与分页"
-        description="按状态、Thread、时间筛选；分页参数在 F2 与后端一起确定。"
-      >
-        <p className="muted">F1 只保留布局位置，不实现交互。</p>
-      </Panel>
+        <div className="demo-note">
+          ⓘ 任务列表使用本地示例数据，尚未连接真实 Task/Execution 查询接口。
+        </div>
+      </div>
     </div>
   )
 }

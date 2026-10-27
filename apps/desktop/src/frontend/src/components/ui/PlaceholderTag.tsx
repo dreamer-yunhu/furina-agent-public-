@@ -5,5 +5,5 @@ interface PlaceholderTagProps {
 }
 
 export function PlaceholderTag({ label = '占位' }: PlaceholderTagProps) {
-  return <span className="tag tag--placeholder">{label}</span>
+  return <span className="tag">{label}</span>
 }
