@@ -2,6 +2,7 @@
 // 复核重点：消息结构对齐 Codex 原型（user-row / msg / tool-row），
 // 工具调用状态与审批状态分开显示。
 
+import { artwork } from '../../assets/app/artwork'
 import { Icon } from '../../components/ui/Icon'
 import type { DemoMessage, DemoToolCall } from '../../demo/types'
 import { TOOL_STATUS_META } from '../shared/statusMeta'
@@ -45,7 +46,11 @@ export function MessageRow({ message }: { message: DemoMessage }) {
   return (
     <div className="msg">
       <div className="bot-avatar" aria-hidden="true">
-        芙
+        {artwork.avatar ? (
+          <img className="bot-avatar__image" src={artwork.avatar} alt="" />
+        ) : (
+          '芙'
+        )}
       </div>
       <div className="msg-body">
         <div className="msg-author">

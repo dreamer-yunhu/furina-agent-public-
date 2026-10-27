@@ -296,6 +296,7 @@ cd C:\furina-agent
 | `frontend/src/layouts/InspectorSlot.tsx` | 改为 `.panel-head` + `.panel-content` | 关闭按钮只影响布局，不代表取消任务 |
 | `frontend/src/app/App.tsx` | HeaderBar 去掉 windowRole；ChatPage 不再传 inspector 状态；面包屑/主题由顶栏统一 | ChatPage 按 threadId 重挂载，避免本地 Demo 消息串会话 |
 | `frontend/src/hooks/useTheme.ts` | 默认 `light`（对齐原型），仍支持 system/dark | `system` 不写 data-theme；localStorage 不可用时静默降级 |
+| `frontend/src/assets/app/artwork.ts`、`SidebarNav`、`MessageRow`、`EmptyState` | **美术资源接口扩展**：`background` / `character` / `logo` / `avatar` / `emptyState`；每个位置都有文字或中性占位回退 | 资源只放 `src/assets/app/`；字段未填时不改变布局；不要引入未授权素材 |
 | `frontend/public/codex-demo.html`、`codex-demo-README.md` | 保留原始静态原型 | 不是 React 入口；仅用于对照 |
 | `frontend/src/**/*.test.tsx` | 更新 24 项测试：路由/导航/侧栏折叠/详情/主题/审批卡片 | 审批测试验证「批准 ≠ 执行成功」 |
 | `docs/demo/screenshots/*.png`、`frontend/README.md` | 截图按新 React UI 重拍；README 更新视觉层说明 | 截图来自实际运行，不是设计稿 |

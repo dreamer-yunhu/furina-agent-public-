@@ -6,6 +6,7 @@
 
 import { Link } from '../../app/Link'
 import type { RouteName } from '../../app/router'
+import { artwork } from '../../assets/app/artwork'
 import { Icon } from '../../components/ui/Icon'
 import { demoApprovals, demoTasks, demoThreads } from '../../demo/data'
 
@@ -37,7 +38,11 @@ export function SidebarNav({
     <div className="sidebar">
       <div className="brand">
         <div className="logo" aria-hidden="true">
-          ✦
+          {artwork.logo ? (
+            <img className="logo__image" src={artwork.logo} alt="" />
+          ) : (
+            '✦'
+          )}
         </div>
         <div className="brand-text">
           芙芙 Agent
@@ -150,7 +155,13 @@ export function SidebarNav({
 
       <div className="sidebar-bottom">
         <div className="profile">
-          <div className="avatar">芙</div>
+          <div className="avatar">
+            {artwork.avatar ? (
+              <img className="avatar__image" src={artwork.avatar} alt="" />
+            ) : (
+              '芙'
+            )}
+          </div>
           <div>
             芙芙 Agent
             <small>本地工作空间 · Demo</small>

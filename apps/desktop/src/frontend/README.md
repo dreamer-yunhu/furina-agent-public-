@@ -101,7 +101,14 @@ npm run tauri:build    # 出安装包（msi / nsis）
 1. **路由使用 hash**。Tauri 生产环境从 `dist/` 加载，不假设服务端回退 `index.html`。
 2. **布局与视觉解耦**：业务页面只用 `ContentSection`、`StatusPill` 等组件；
    颜色/间距/圆角改 `tokens.css` 与 `theme.css`。
-3. **美术替换入口**：`src/assets/app/artwork.ts`；没有资源时使用中性占位。
+3. **美术替换入口**：`src/assets/app/artwork.ts`。把图片放到 `src/assets/app/`，
+   在 `artwork.ts` 里 import 并填入对应字段即可；没有资源时全部回退到中性占位/文字，
+   不需要改业务组件：
+   - `background`：工作台背景层
+   - `character`：右下角角色入口
+   - `logo`：侧栏品牌 Logo
+   - `avatar`：侧栏用户头像 + 消息中的 Agent 头像
+   - `emptyState`：空状态插图（任务/执行/404）
 4. **Demo 数据与真实数据分离**：`src/demo/` 只服务演示；F2 接入真实 API 时另建
    `services/api` 类型与请求层，不能直接复用 Demo 类型。
 5. **审批状态 ≠ 执行状态**：`demo/types.ts` 把 `status` 与 `toolExecutionStatus`
