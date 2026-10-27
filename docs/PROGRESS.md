@@ -279,6 +279,40 @@ cd C:\furina-agent
 > 原 `AI-CHANGES.md` 的职责并入本节；完整历史见 git。
 > 新增改动请追加到本表，并写明**复核重点**。
 
+### 2026-10-27 · 前端 F1：工作台骨架与美术插槽
+
+> 依据：`docs/audit/2026-10-27-前端集成F0-整合审计.md` 与用户提供的 F1 开工指南。
+> 一句话：把 Vite 模板替换成**可导航、可换肤、可插槽**的工作台骨架；
+> **不接任何后端接口、不写模拟业务数据**。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `frontend/src/app/router.ts` | **新建**：hash 路由匹配（`matchPath`）、`navigate`、`useHashLocation`、`ROUTE_TITLES` | ① 用 hash 而非 history，因为 Tauri 生产环境不保证未知路径回退 `index.html`；② `navigate` 用 `pushState` + 显式派发 `hashchange`（jsdom 不会自动派发）；③ 同时监听 `popstate`，保证前进/后退 |
+| `frontend/src/app/App.tsx` | **新建**：路由 → 页面映射；根路径重定向 `/chat`；Inspector 显隐由路由决定 | 不在这里发请求、不推断任务状态；新增页面只改这里与 `router.ts` |
+| `frontend/src/app/Link.tsx` | **新建**：内部链接，拦截普通左键 | 带修饰键/中键的点击交还浏览器 |
+| `frontend/src/layouts/*`（7 个） | **新建**：`WorkbenchLayout` + Header/Sidebar/Main/Inspector/Background/Character 插槽 | 布局只管网格、定位、滚动；插槽内容全部由 props 注入；窄屏 Inspector 改浮层、小屏侧栏改横向导航 |
+| `frontend/src/pages/*`（8 个） | **新建**：对话/任务/任务详情/执行详情/审批/审批详情/设置/404 | 全部空状态明确写「接口尚未实现」；不生成模拟行；设置页不发起探活 |
+| `frontend/src/features/navigation/*`、`features/inspector/*` | **新建**：顶栏、侧栏导航、按路由的详情面板 | 导航项只描述「去哪里」；详情面板只放占位，不伪造执行数据 |
+| `frontend/src/components/**` | **新建**：Panel/PageHeader/EmptyState/Notice/KeyValueList/PlaceholderTag/ConnectionStatus/AppBackground/CharacterPlaceholder | `ConnectionStatus` 默认 `unknown`，不得默认显示已连接；占位组件与业务组件分离 |
+| `frontend/src/styles/*`（6 个） | **新建**：tokens/theme/layout/components/pages/index | 业务组件只用 `theme.css` 的语义变量；深色模式跟随系统，也可用 `data-theme` 覆盖；布局宽度/层级/安全边距都在 tokens |
+| `frontend/src/assets/app/artwork.ts` | **新建**：美术资源集中入口（当前为空） | 换图只改这里；不要引入未授权素材 |
+| `frontend/src/services/desktop/windowRoles.ts` | **新建**：F4 双窗口适配缝（`?window=character`） | **当前未接线到 Tauri**；只影响顶栏角色标签，不创建窗口 |
+| `frontend/src/services/api/config.ts` | **新建**：`API_BASE_URL` | F1 只在设置页展示，不发起请求；F2 的 API Client 从这里取 |
+| `frontend/src/main.tsx` | 改为挂载 `app/App` + 单一 `styles/index.css` | 不要恢复组件内全局 CSS 导入 |
+| `frontend/src/test/setup.ts`、`router.test.ts`、`App.test.tsx`、`vitest.config.ts` | **新建**：jsdom 测试，覆盖路由匹配、默认页、侧栏导航、详情参数、404、根路径重定向 | 只测纯前端；不启动后端、不 mock 业务数据 |
+| `frontend/package.json`、`tsconfig.node.json` | 新增 `test`/`test:watch` 脚本与 4 个开发依赖（vitest/jsdom/@testing-library/react/@testing-library/jest-dom）；`vitest.config.ts` 纳入 node tsconfig | 测试依赖只在 devDependencies；不改生产依赖 |
+| `frontend/README.md` | 更新为 F1 目录结构、命令、设计约束与「未实现」清单 | 不得把 F1 绿灯写成业务链路已验证 |
+| 删除 `frontend/src/App.tsx`、`App.css`、`index.css`、`assets/{react.svg,vite.svg,hero.png}` | 移除 Vite 模板示例 | 只删模板演示资源，不动 `src-tauri/`、`vite.config.ts`、`tauri.conf.json` |
+
+**实测（2026-10-27）**：
+- `npm run build` ✅（tsc -b + vite build，48 modules）
+- `npm run lint` ✅（oxlint 无输出）
+- `npm run test` ✅（2 files / 14 tests）
+- `npm run dev`（vite 8.3.5，127.0.0.1:1420）✅ HTTP 200，检查后已停止
+- **未运行**：任何后端测试、SSE 断连、审批恢复、Tauri 窗口/进程测试（属于 F2–F4）
+
+**未提交**：本轮改动停留在工作区，未执行 `git commit` / `git push`。
+
 ### 2026-10-26（第二轮）· Stage A 跨轮状态残留修复
 
 > 依据：`docs/audit/2026-10-26-StageA-第二轮审计与修复.md`（含缺陷 D1~D7 与证据）。

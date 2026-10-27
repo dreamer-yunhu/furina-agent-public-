@@ -1,0 +1,35 @@
+/* ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ── */
+/* 页面级布局：只放页面之间共享的结构，不写具体业务视觉。 */
+
+.page {
+  max-width: var(--layout-page-max);
+  margin: 0 auto;
+}
+
+.page__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.chat-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 24rem);
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.chat-layout__composer {
+  position: sticky;
+  top: var(--space-4);
+}
+
+@media (max-width: 1000px) {
+  .chat-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-layout__composer {
+    position: static;
+  }
+}

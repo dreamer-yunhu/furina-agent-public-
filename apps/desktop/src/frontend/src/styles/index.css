@@ -1,0 +1,8 @@
+/* ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ── */
+/* 样式入口：顺序固定为 令牌 → 主题 → 布局 → 组件 → 页面。 */
+
+@import "./tokens.css";
+@import "./theme.css";
+@import "./layout.css";
+@import "./components.css";
+@import "./pages.css";
