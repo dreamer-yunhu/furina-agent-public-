@@ -279,6 +279,306 @@ cd C:\furina-agent
 > 原 `AI-CHANGES.md` 的职责并入本节；完整历史见 git。
 > 新增改动请追加到本表，并写明**复核重点**。
 
+### 2026-10-30 · D1.1 Release 启动可观测性补全
+
+> 前置：`docs/audit/2026-10-30-D1-后端托管-审计报告.md`（只读审计，结论是"托管已实现，缺的是可观测性"）。
+> 本刀**只加观测手段**：不改 BackendManager 结构、不动 Job Object 语义、不碰 DB/LangGraph/T23/前端聊天、不加自动重启、不改数据目录布局。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `src-tauri/src/lib.rs` | 日志插件改为 **debug/release 都注册**；`max_file_size=2MB` + `UseLocal` 时区；`keyring` 压到 WARN；启动打 profile/版本/exe/PID 横幅；`RunEvent::Exit` 前后的退出边界日志 | ① release 现在会**持续写文件**到 `%LOCALAPPDATA%\com.furina.desktop\logs\`，注意轮转是 KeepOne；② 横幅必须出现在 `spawn` 之前，否则定位不到"启动到哪一步" |
+| `src-tauri/src/backend.rs` | 新增：子进程 stdout/stderr 分别重定向到 `backend.stdout.log` / `backend.stderr.log`；`watch_exit()` 用**独立 OpenProcess 句柄**等待并记录退出码；`wait_until_ready()` 用 HTTP `GET /healthz` 轮询，**200 才算 READY**；端口被占时只探一次并记录 HTTP 码；新增 `FURINA_BACKEND_EXE` 诊断覆盖 | ① 监控线程**不碰 `Child`**，否则会和 `restart()/shutdown()` 抢锁或抢回收；② "端口通 ≠ 就绪"是本刀的核心判据，别把 `port_open()` 改回去当就绪；③ `FURINA_BACKEND_EXE` 只用于验收，生产路径不应设置 |
+| `apps/desktop/src/furina_desktop/main.py` | 新增启动横幅（pid/解释器/是否冻结/cwd/模型/**密钥只报是否配置**）；lifespan 加 `[阶段 n/6]` 标记并整体包一层 try/except（CRITICAL + `exc_info` 后**原样上抛**）；`_setup_logging` 增加 **stderr 处理器（WARNING+）** 兜底；`run()` 捕获异常留痕再抛 | ① 这层 try/except 是**记录**不是**兜底**，异常必须继续上抛让进程非零退出；② WARNING 及以上会同时出现在 `desktop.log` 与 `backend.stderr.log`（有意重复）；③ 横幅**绝不能**打印 `api_key` 值 |
+| `dist-backend/furina-backend.exe`、`src-tauri/binaries/furina-backend.exe` | 用 `scripts/build_backend.py` 重建（54.5 MB），带上新的 Python 启动日志 | 产物不入库但会进安装包；改完 Python 必须重建，否则 dev 仍跑旧 exe（见审计 R8） |
+
+**已验证（本机实测）**：Debug/Release 均产出完整启动日志；不存在的 exe → `kind=NotFound raw_os_error=3`；秒退进程 → `退出码=2 运行时长=57ms`；进程活着但不监听 → 20s 后 `健康检查 FAILED`；端口被非后端占用 → 记录 `HTTP 404` 而非"就绪"；`SANDBOX_ROOT` 指向坏盘 → CRITICAL + 完整 traceback 落 stderr 且 `Application startup failed. Exiting.`；`taskkill /F` 应用后后端零残留（Job Object 未变）；全部日志 `sk-` / `API_KEY=` 命中 **0**；后端 pytest 41 passed。
+
+**未验证**：未重装 NSIS 安装包（只构建未安装）；"无 Python 机器"仍未实测。
+
+### 2026-10-30 · App 图标换成芙宁娜立绘
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `assets/pixel-art/furina_icon_source.png` | 新增原图（1254×1254 RGB） | 唯一真源；后续换图直接替换它 |
+| `scripts/make_app_icon.py` | 新增图标母版生成脚本 | 圆角半径（313px）是从左上角弧线拟合的；换图后先跑 `--probe` 看四个角是否贴合，偏了用 `--rect l,t,r,b,radius` 覆盖 |
+| `assets/pixel-art/icon_master_1024.png` | 新增 1024² RGBA 母版 | 框外做成全透明（非保留浅蓝底），目的是深色任务栏上不出现白方块 |
+| `apps/desktop/.../src-tauri/icons/*` | `npx tauri icon` 整套重生成（含 `icon.ico` 16/24/32/48/64/256、`icon.icns`、Windows Store 各尺寸） | `icon.ico` 的多尺寸是 CLI 生成的，别手工改 |
+
+**做法**：原图自带圆角外框 + 一圈柔光晕，按像素直接抠会得到毛边；因此先洪泛填充粗测包围盒（x∈[77,1184)、y∈[100,1191)），再从左上角弧线解方程拟合半径，最后用拟合出的圆角矩形**重绘**一张 4× 超采样遮罩去切。
+
+**已验证**：`icon.ico` 含 6 档尺寸；32px 下仍能辨认王冠与人脸（预览见 `assets/pixel-art/preview/`）。
+
+**未验证**：未执行 `tauri build`，打包产物内的 exe 图标尚未实测；桌面快捷方式是通过 `IconLocation` 指向独立 `.ico` 临时生效的，重装后会指回 exe 内嵌图标。
+
+### 2026-10-28 · 冒烟脚本 → pytest（第二阶段：原生化 5 个）
+
+| 原脚本 | 新测试 | 用例数 | 转换要点 |
+|---|---|---|---|
+| `smoke_coder_isolation.py` | `test_coder_isolation.py` | 1 | 断言"模型实际收到的消息列表"，不是 state 字段 |
+| `smoke_checkpoint.py` | `test_checkpoint.py` | 1 | 表名以 SQLite 版源码为准（两张表）；`aput` 返回的 id 就是传入 id |
+| `smoke_old_hash.py` | `test_old_hash.py` | 4 | 每个用例独立 runtime/DB/沙箱，同一事件循环内创建与释放 |
+| `smoke_approval_flow.py` | `test_approval_flow.py` | 5 | 真实图 + 真实工具 + 真 interrupt，只 stub LLM |
+| `smoke_task_models.py` | `test_task_models.py` | 3 | 长流程拆成 3 个独立建库的用例 |
+
+删除对应 5 个 `smoke_*.py`。**剩余 12 个**仍由 `test_legacy_smoke.py` 桥接：
+
+```
+approval_service · decision_service · lifecycle · resume_service
+stream_bridge · supervisor_route · supervisor_stream · supervisor_turns
+t23_approval_runtime · t23_decision_api · t23_fault_injection · timeout_scanner
+```
+
+**全套结果**：`pytest apps/desktop/tests -q` → **41 passed in 54s**
+（原生化后比桥接阶段更快：少了 5 次进程启动）。
+
+**转换时踩到的坑（写下来给下一个脚本）**
+1. 异步代码用 `asyncio.run(...)` 包住整个场景，**不要跨 `asyncio.run` 复用
+   aiosqlite 引擎** —— 连接绑定事件循环，跨循环会炸。所以 each test 自建 env。
+2. `CheckpointTuple.checkpoint` 是 **dict**，用 `.get()`；getattr 永远拿 None。
+3. 长流程脚本若拆成多个用例，每个用例要**独立建库**，不能依赖执行顺序。
+
+**下一步迁移建议**：`stream_bridge`（295 行，SSE 桥核心）→
+`supervisor_route/stream/turns`（3 个、~700 行）→ `t23_*`（3 个、~1150 行）→
+服务层大件（`lifecycle` 574 / `resume_service` 455 / `timeout_scanner` 465 /
+`approval_service` 269 / `decision_service` 338）。
+
+### 2026-10-28 · 冒烟脚本 → pytest（第一阶段：统一入口 + 去重）
+
+> 现状：`tests/` 下有 19 个 `smoke_*.py`（约 5100 行、586 处断言），
+> 它们自己 `main()` + `check()` + `sys.exit(1)`，pytest 收集不到，
+> 等于游离在统一入口之外。
+
+**这一阶段做了什么**
+
+| 处理 | 对象 | 依据 |
+|---|---|---|
+| 删除（已被取代） | `smoke_http_resume.py` | 负向用例（409 不匹配 / 404 未知线程 / 409 未挂起 / 409 重放）**已并入** `test_api_contracts.py::test_resume_rejects_bad_requests`，原脚本删除 |
+| 原生化 | `smoke_tool_safety.py` → `test_tool_safety.py` | 无全局状态，改用 `tmp_path`；9 个用例 |
+| 桥接（过渡态） | 其余 17 个 | `test_legacy_smoke.py` 参数化子进程执行，断言退出码 0；脚本被原生化并删除后，参数列表自动变短 |
+
+**结果**：`pytest apps/desktop/tests -q` → **32 passed in 64s**
+（契约 6 + 工具安全 9 + 遗留冒烟 17）。
+
+**为什么先桥接而不是一次性重写**
+17 个脚本各有独立夹具（临时库 / 假模型 / chdir），一次性重写风险高于收益；
+先用桥接保证"能统一跑、失败可见"，再按下面的顺序逐个原生化。
+
+**原生化优先级（下一步）**
+1. `smoke_coder_isolation`（133 行）→ 子图每轮白纸
+2. `smoke_checkpoint`（165 行）→ SQLite checkpoint 语义
+3. `smoke_old_hash`（187 行）→ 乐观锁
+4. `smoke_approval_flow`（222 行）→ coder 子图审批
+5. `smoke_task_models`（257 行）→ 表约束
+6. 大件（`lifecycle` 574 / `timeout_scanner` 465 / `resume_service` 455 /
+   `decision_api` 405 / `approval_runtime` 411）单独排期
+
+**冗余判定**：只有 `smoke_http_resume` 是被完整取代的；其余 17 个覆盖的是
+不同层次（core 服务 / 图 / HTTP），**没有证据支持删除**，不做"看着像重复就删"。
+
+### 2026-10-28 · 契约测试 + 任务/审批列表接口
+
+> 教训：前一阶段用「改代码 → 打包 40s → 点界面」验证后端契约，效率低且分不清
+> 是"后端没更新"还是"前端写错"（实际踩过一次：内置 exe 还是旧版 → 页面 404）。
+> 改为**契约先行**：先用 pytest 把后端行为钉死，前端照同一份契约实现。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `furina_desktop/api/agent.py` | 新增 `GET /agent/tasks`、`GET /agent/approvals`、`GET /agent/threads/{id}/pending` | ① 列表**必须按 user_id 过滤**（core 的 list_* 不带归属）；② `instruction` 只回前 200 字；③ 审批列表不含 `args_json`（可能很大）；④ 非法 status → 422 |
+| `furina_desktop/services/agent_thread.py` | `list_user_tasks` / `list_user_approvals` | join `AgentThreadID` 做归属过滤；分页用 `count(*) over subquery` |
+| `apps/desktop/tests/conftest.py` | **新建** pytest 夹具 | chdir 到 tmp 再 create_app；装假意图 + 假模型；chdir 必须在 finally 还原 |
+| `apps/desktop/tests/test_api_contracts.py` | **新建** 5 个契约测试 | 覆盖 healthz / 会话 CRUD / 空历史 / 任务与审批列表 / **审批全链路**（中断→pending 恢复→decisions→resume→SUCCEEDED） |
+| `frontend/src/services/api/activity.ts` | **新建**：任务、审批、pending 三个查询 | 状态是后端原样字符串，展示层再映射 |
+| `frontend/src/pages/{TasksPage,AuditPage}.tsx` | 接真实数据 | 审计页把「已批准」与「执行成功」分成两个字段展示 |
+| `frontend/src/pages/ChatPage.tsx` | 加载历史后查 `pending`，恢复审批卡 | 失败不改变页面状态：恢复审批是增强，不该让历史也报错 |
+
+**测试结果**：`5 passed in 4.5s`（`python -m pytest apps/desktop/tests/test_api_contracts.py`）。
+pytest 已进 `[dependency-groups] dev`，装依赖用 `uv sync --all-packages`。
+
+**实测**：安装版打开后，任务页显示真实任务（已完成），审计页显示真实审批记录
+（`write_file_tool · approval_test.txt · 已批准`）。
+
+### 2026-10-27 · F2-c 全接口接入 + T6 密钥安全存储
+
+> 范围：后端现有 HTTP 接口全部接上（会话增删改查 + 审批决策/恢复），
+> 密钥从明文 `.env` 迁到系统凭据库。Tasks / 审计页**不在范围内** —— 后端没有列表接口。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `frontend/src/services/api/threads.ts` | 新增 `createThread` / `renameThread` / `deleteThread` | title 上限 255；删除会连带删 checkpoint，UI 必须二次确认 |
+| `frontend/src/services/api/approvals.ts` | **新建**：`submitDecisions` + `resumeChat` | 后端是**两步**：先落库再续跑。顺序反了会丢审计 |
+| `frontend/src/services/api/chat.ts` | 抽出 `readSse` / `postSse` | `/agent` 与 `/agent/resume` 共用同一套 SSE 解析 |
+| `frontend/src/features/chat/PendingApproval.tsx` | **新建**：真实审批卡 | ① **必须收齐所有裁决再提交**（resume 会逐条比对挂起项，少一条就 409）；② `approval_id` 优先、`tool_call_id` 兜底；③ 批准 ≠ 执行成功 |
+| `frontend/src/pages/ChatPage.tsx` | 处理 `approval_required`，提交后走 decisions → resume | 续跑不再插用户气泡；刷新会丢待审批状态（后端无"查询挂起项"接口，已知缺口） |
+| `frontend/src/features/navigation/SidebarNav.tsx` | 新建/重命名/删除会话 | 离线时退回 Demo；删除当前会话后回 `/chat`；动作按钮悬停才出现 |
+| `src-tauri/src/credentials.rs` | **新建**：Windows 凭据管理器读写 | status 只回尾号，绝不回显完整密钥；删除幂等（NoEntry 也算成功） |
+| `src-tauri/src/backend.rs` | 启动时注入 `DEEPSEEK_API_KEY`；新增 `restart()`；**杀进程树** | ⚠️ 只 kill launcher 会留下 python 孤儿占着 8001（实测踩到）；改用 `taskkill /T` |
+| `src-tauri/src/lib.rs` | 三个命令：`api_key_status` / `save_api_key` / `clear_api_key` | 保存后重启后端（环境变量只在新进程生效）；重启失败不算致命，回 warning |
+| `frontend/src/pages/SettingsPage.tsx` | 密钥管理 UI + 真实连接状态 | 输入框 type=password，保存后立刻清空；浏览器环境提示"仅桌面端可用" |
+
+**验收实测**：
+
+| 场景 | 结果 |
+|---|---|
+| 新建会话 | 点击后立即创建并跳转，侧栏出现「新会话 10/27 21:37」 |
+| 重命名 | 行内输入 → Enter → 后端标题更新 |
+| 删除 | 二次确认 → 后端删除 → 侧栏刷新，当前会话回到 `/chat` |
+| **审批全链路** | 发「新建 approval_test.txt」→ 真实审批卡（路径/diff/±行数）→ 批准 → 落库 + 续跑 → 文件落盘内容 `hello` |
+| 密钥保存 | `未配置` → `已保存 · 尾号 abcd`，后端自动重启 |
+| 密钥清除 | 回到 `未配置`，后端重启，**无 warning**（修掉进程树问题后） |
+
+**过程中发现并修掉的问题**：
+1. **只杀 launcher 不杀子进程** —— dev 下 `.venv\Scripts\furina-desktop.exe` 是 launcher，
+   真正跑 uvicorn 的是它派生的 python。只 kill launcher 会留孤儿占着 8001，
+   导致密钥重启后的状态跟踪错乱（表现为"当前后端不是本应用启动的"）。改 `taskkill /T`。
+2. **我自己踩了构建闸门** —— 为省时间直接 `cargo build --release` 改 Rust，
+   产出的又是 dev 模式包；`npm run verify:release` 立刻抓到（`localhost:1420`）。
+   闸门是有效的，代价是自己要记得别绕过。
+
+**已知缺口**：
+- Tasks / 审计页仍是 Demo —— 后端没有任务/审批**列表**接口，前端无从接起。
+- 刷新页面会丢失"待审批"卡片状态；后端也没有"查询当前挂起项"的接口。
+- 新建会话的标题是时间戳，未做自动摘要。
+
+### 2026-10-27 · T4 后端打包（PyInstaller，假设 A 验证）
+
+> 目标：安装包自带后端运行时，目标机不需要装 Python。
+> 结论：**成立**。安装包 3.8 MB → 48.9 MB，多出来的就是后端 exe。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `scripts/build_backend.py` | **新建**：PyInstaller 构建脚本，产物自动复制到 `src-tauri/binaries/` | ① 必须 `--add-data` 带上 `agent/prompts/*.txt`，否则打包后首次对话 `PromptNotFound`（开发态永远复现不了）；② `--collect-submodules uvicorn` + `aiosqlite` / `sqlalchemy.dialects.sqlite.aiosqlite` 是隐式导入；③ 排除 lancedb/pyarrow/pandas，否则体积翻几倍 |
+| `scripts/backend_entry.py` | **新建**：PyInstaller 需要一个脚本路径 | 只是 `furina_desktop.main:run` 的壳 |
+| `packages/core/src/furina_core/config.py` | `_find_dotenv()` 增加冻结态分支 | 冻结包的 `__file__` 在 `%TEMP%\_MEIxxxx`，**沿父目录找 .env 必然失败**。改为：exe 同级 → CWD → `%APPDATA%\furina-agent\.env` |
+| `furina_desktop/agent/llm.py` | 缺 key 时用占位 key 构造 ChatOpenAI | 原写法在没配 key 的机器上**导入期就抛异常**，后端连 `/healthz` 都起不来，用户只看到"未连接"。现在能起、`llm_key_configured=false`、真正 401 推迟到调用时 |
+| `src-tauri/src/backend.rs` | 启动顺序改为「内置 exe 优先，开发 venv 兜底」 | 安装态 cwd 必须是可写目录（`app_local_data_dir()/backend`），安装目录通常不可写 |
+| `tauri.conf.json` / `package.json` / 根 `pyproject.toml` | `bundle.resources` 打包内置二进制；`build:backend` 脚本；pyinstaller 进 dev 依赖组 | ⚠️ `uv sync` 必须带 `--all-packages`，否则会把 workspace 成员包卸掉（实测踩到，import 立刻失败） |
+
+**验收实测**：
+
+| 场景 | 结果 |
+|---|---|
+| 冻结 exe 单独运行（仓库外目录） | 6s 冷启动，`/healthz` 200 |
+| 无 `.env` | 能启动，`llm_key_configured=false`（可诊断，不再崩） |
+| `.env` 放 `%APPDATA%\furina-agent\` | `llm_key_configured=true`，`POST /agent` 收到 `token` + `done` |
+| 安装包 | 48,906,473 B；安装后 `binaries\furina-backend.exe` 就位 |
+| 启动安装版 | 实际进程路径 = 安装目录下的内置 exe，非仓库 venv；数据落在 `%LOCALAPPDATA%\com.furina.desktop\backend\` |
+| 关窗 | 应用 0.25s 退出，`furina-backend.exe` 残留 **0**，端口释放 |
+
+**未验证 / 已知风险**：
+- **没有真的在"无 Python 的机器"上跑过**（本机卸不掉 Python）。PyInstaller 内嵌解释器是标准保证，但没实测就只能算推断。
+- 单文件 exe 是杀毒软件误报高发区，未在装有第三方杀软的机器上验证。
+- `.env` 目前是**明文文件**，T6（密钥安全存储）没做。
+
+### 2026-10-27 · T5-A Tauri 托管 Python 后端
+
+> 方案 A：只接开发环境（仓库 `.venv`），打包（T4）留到后面单独做。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `src-tauri/src/backend.rs` | **新建**：拉起、探活、退出回收、强杀兜底 | ① **只回收自己拉起的进程**（`Option<Child>` 为 None 表示归别人）；② 端口已占用时跳过启动，退出也不杀；③ Job Object `KILL_ON_JOB_CLOSE` + 故意不关句柄，保证 `taskkill /F` 和崩溃时后端也被内核带走；④ 判活用 TCP 连接而不是 HTTP，健康语义由前端 `/healthz` 负责 |
+| `src-tauri/src/lib.rs` | `.run(ctx)` → `.build(ctx)` + `app.run(callback)` | 只有这种写法能收到 `RunEvent::Exit`；退回旧写法就没有回收时机 |
+| `src-tauri/Cargo.toml` | 新增 `windows-sys = "0.61"`（lock 里已有，不增体积） | 必须带 `Win32_System_Threading` 和 `Win32_Security`：`JOBOBJECT_EXTENDED_LIMIT_INFORMATION` 与 `CreateJobObjectW` 分别被这两个 feature gate，少一个直接编译失败 |
+| `frontend/src/app/providers/BackendProvider.tsx` | 在线每 10s 探活；离线每 5s 重试 | 原来只探一次：后端晚起或中途崩溃，顶栏会一直是"已连接"——只会变绿的指示灯比没有更糟 |
+| `frontend/scripts/verify-release.mjs` | 等 `readyState=complete`，并在 `about:blank` 过渡 target 上换 target 重试 | 后端拉起推迟了窗口出现，验收脚本曾被过渡页误判为"加载失败" |
+
+**验收实测（全部在本机跑通）**：
+
+| 场景 | 结果 |
+|---|---|
+| 启动自动拉起 | 端口原本空闲 → 启动应用后 `/healthz` 200，顶栏「已连接」 |
+| 正常关窗 | 应用 0.8s 退出，后端子进程数 **0**，端口释放 |
+| 强杀应用（`taskkill /F`） | 后端进程数 **0**，端口释放（Job Object 生效） |
+| 后端中途崩溃 | 10s 内顶栏变「未连接」 |
+| 后端重启后 | 5s 内自动恢复「已连接」，线程列表重新加载 |
+| 已存在的后端 | 应用不重复拉起（进程数保持 2），强杀应用后它**仍然存活** |
+
+**已知边界**：
+- 仓库路径来自 `CARGO_MANIFEST_DIR`（**编译期**），所以当前安装包只能在本机构建、本机运行；换机器会静默"未连接"。这是方案 A 的固有限制，等 T4 打包解决。
+- 应用不会**重启**崩溃的后端（只重连探测）。TODO 里没有要求，先记着。
+- 残留的旧后端不清理而是直接复用（端口占用即视为"已有服务"）；若它处于病态（端口开但 `/healthz` 不过），应用会一直停在未连接。
+
+### 2026-10-27 · F2-b 会话历史 + 流式对话
+
+> 本刀包含一个**后端新接口**：`GET /agent/threads/{id}/messages`。
+> 原因：历史不在会话表里，散在每次 Execution 各自的 checkpoint 中，前端无法自行拼出。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `furina_desktop/services/agent_thread.py` | 新增 `list_thread_executions`：thread → tasks → executions 按时间正序 | 必须 join `AgentTask` 才能按 thread 过滤；排序缺一层历史就会乱 |
+| `furina_desktop/api/agent.py` | 新增 `GET /threads/{thread_id}/messages` | ① **chat 子图的回复不在根 `messages` 里**，它写在子图 `chat_messages` 并回填根 `result`，历史必须把 `result` 当助手消息补进来（见 `agent/nodes/chat.py:55-69`）；② 纯 tool_call 的 AI 消息 content 为空，要跳过，否则前端出现空气泡 |
+| `frontend/src/services/api/{messages,chat}.ts` | **新建**：历史读取；SSE 流式发送（按 `\n\n` 切帧） | ① 流式**不设总超时**，取消靠 AbortSignal；② 未知事件类型跳过而不是抛错 |
+| `frontend/src/pages/ChatPage.tsx` | 双路径：Demo 会话 / 真实会话（历史 + 流式） | ① 判定"真实会话"必须同时看 `backend.status`，不能只看 id 在不在 Demo 数据里；② 流式用累加变量 `acc` 收尾，避免多处读 state 丢字；③ 错误必须显示 |
+| `frontend/src/features/chat/{Composer,ConversationHeader}.tsx` | Composer 加 `disabled`（流式中禁止重复提交）；顶栏标签区分「真实数据 / Demo 数据」 | 真实模式下不再显示"无待审批"——后端列表接口没返回该信息，不能编 |
+
+**实测**：
+- 历史：真实线程读到 `user + assistant` 两条（`result` 回填生效），界面显示「真实数据」
+- 流式：界面发送「请只回三个字：收到了」→ 出现「Agent 正在回复…」→ 约 5s 后渲染「收到了」，无报错
+- 后端 `smoke_task_models.py` 21/21 通过
+
+**未做**：新接口没有自动化测试（仅手工 curl + UI 验证）；新建会话仍未接后端。
+
+### 2026-10-27 · F2-a 前端接入真实后端（只读切片）
+
+> 范围：**只打通读取**（健康检查 + 线程列表）。写入与流式对话留到下一刀。
+> 后端契约来源：`/healthz`、`GET /agent/threads?page&size`（响应 `{items,total,page,size}`）。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `frontend/src/services/api/{types,client,threads}.ts` | **新建**：后端 DTO、带超时的 fetch 封装、线程列表接口 | ① DTO 用 snake_case，**不复用 demo/types.ts**；② 4s 超时必须有，否则服务没起时界面一直转圈；③ 错误统一转 `ApiError`，不要把原生 TypeError 抛给 UI |
+| `frontend/src/app/providers/{backendContext.ts,BackendProvider.tsx}` | **新建**：启动时先探 `/healthz` 再取列表，状态 `checking/online/offline` | ① 先探活再取列表，能区分"没起来"和"起来了但坏了"；② offline 必须把原因写进 state 并显示，**不静默失败**；③ 单测环境直接跳过探测（jsdom 里发真请求不可靠） |
+| `frontend/src/features/navigation/HeaderBar.tsx` | 顶栏「演示环境」硬编码 → 真实 `ConnectionStatus` | 默认 `unknown`（「连接待检测」），没探完不许显示已连接 |
+| `frontend/src/features/navigation/SidebarNav.tsx` | 最近会话：在线用真实数据，离线回落 Demo | 真实列表**不返回运行状态**，所以不画状态点；不要为了好看编一个 idle |
+| `frontend/src/app/App.tsx` | 包一层 `BackendProvider`，把连接状态/线程传下去 | App 仍然不发请求，规则不变 |
+
+**实测**（后端 `uv` 起在 8001）：
+- 在线：顶栏「已连接」，侧栏出现真实线程 `stageA-reason 昨天 14:20` 等
+- 停掉后端后重启应用：顶栏「未连接」，侧栏回落到 Demo 数据，不卡死
+
+### 2026-10-27 · 安装说明文档
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `apps/desktop/src/frontend/INSTALL.md` | **新建**：面向拿包人的安装说明 | ① 开头写明「本版是本地 Demo，不连接后端」，避免把界面能点当成 Agent 跑通；② SmartScreen 与 SHA-256 校验放在一起；③ 卸载**不删** `com.furina.desktop`，这是实测行为 |
+
+### 2026-10-27 · 仓库 ACL 修复（T4 落地）
+
+> 对象在仓库目录上，不在 git 里；这里登记是为了让「仓库环境已修」这件事有据可查。
+
+| 对象 | 改动 | 复核重点 |
+|---|---|---|
+| `C:\furina-agent` 整棵树 | 完整性标签 **Low → Medium**，递归 42,454 个对象，0 失败 | ① 只动 Mandatory Label，**没动 DACL**；② 必须提权（普通令牌缺 `SeRelabelPrivilege`，未提权时根目录能改、子项全部「拒绝访问」）；③ `Everyone:(CI)(DENY)(DC)` **保留未动**，将来若要清这条需单独评估 |
+| 备份 | `%APPDATA%\CherryStudio\Data\Agents\<id>\acl_backup_20261027\`（DACL 导出 + 文本快照 + RESTORE.md） | `icacls /save` **不保存完整性标签**，回滚标签要单独跑 `setintegritylevel Low` |
+
+验收：修复前在仓库内启动 EXE → `exit_code=101`（Rust panic，3.9s）；修复后在仓库内直接启动 → 页面正常（`href=http://tauri.localhost/#/chat`）。新建文件探针确认为 `Medium` 继承。
+
+来源判断（推断）：桌面目录有同一套 ACL 指纹且明确含 `AI_player\CodexSandboxUsers`，故低标签由 Codex 的 Windows 沙箱模板写入；**再次运行 Codex 沙箱是否会重新打上未实测**。
+
+### 2026-10-27 · 发布包冒烟验收（把静默失败变成闸门）
+
+> 目的：让「窗口开出来了但前端没加载」这类问题不可能再靠肉眼验收通过。
+> 判据从「进程起来了」改成「页面来源是 `http://tauri.localhost` 且 React 根节点有内容」。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `apps/desktop/src/frontend/scripts/verify-release.mjs` | **新建**：启动 EXE → 连 WebView2 CDP → 断言 title/href/readyState/`#root` 子节点/文本长度 | ① 断言里最关键是 `href` 前缀，它直接区分 dev 模式与正式包；② **必须先把 EXE 复制到临时目录再启动**，仓库目录的 Low 完整性标签会让进程 exit 101，那是环境问题不是产物问题；③ 启动早期 CDP 会先返回 `about:blank`，要等到非 blank 的 page target |
+| `apps/desktop/src/frontend/package.json` | 新增 `verify:release`、`release`（build + verify） | 发布只认 `npm run release` 一个入口 |
+| `apps/desktop/src/frontend/README.md` | 更正「出安装包（msi / nsis）」为仅 NSIS；补构建入口警告 | 警告里的 `cargo build --release` 是最容易犯的绕路 |
+
+> 已被反向验证：拿旧的 dev 模式 EXE（`Programs\furina\furina-desktop.exe`，sha `f4a76c8e…`）跑本脚本 → 正确报 `[FAIL] 加载的是浏览器错误页`、退出码 1。
+
+### 2026-10-27 · 桌面版打包（T1–T4：产物生成与生命周期验收）
+
+> 本轮只动打包配置，未改业务逻辑、主管图、审批链路与前端功能。
+> 核心发现：`target/release/furina-desktop.exe` 此前是 **dev 模式二进制**（`cargo:dev=true`，运行时加载 `http://localhost:1420`），窗口能开但页面是 Edge 错误页。必须走 `npm run tauri:build`（CLI 会带 `custom-protocol` feature）才产出内置资源的正式包。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `apps/desktop/src/frontend/src-tauri/tauri.conf.json` | `bundle.targets`: `"all"` → `["nsis"]` | 只发 NSIS，避免 MSI/WiX 第二条工具链；将来要 MSI 需改回 |
+| 同上 | 新增 `bundle.windows.webviewInstallMode = { type: "embedBootstrapper", silent: true }` | 缺 WebView2 的机器由安装器内嵌的 bootstrapper 联网安装；**目标机仍需联网**，要离线分发需换 `offlineInstaller`（+约 130MB） |
+| 构建产物（未入库） | `target/release/furina-desktop.exe`、`target/release/bundle/nsis/furina-desktop_0.1.0_x64-setup.exe` | 产物在仓库目录内会继承 Low 完整性标签，**分发前必须先复制出仓库目录** |
+
+> AI 改动标记：`tauri.conf.json` 是严格 JSON，无法写 `# <- AI 改动` 行尾注释，故在此登记代替。
+
 ### 2026-10-27 · Codex 原型移植进 React（视觉重构）
 
 > 依据：`C:\Users\l1575\Downloads\furina-codex-ui-demo.zip`（单文件静态原型）。

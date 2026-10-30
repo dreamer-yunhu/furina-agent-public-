@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { artwork } from '../assets/app/artwork'
+import type { ConnectionState } from '../components/feedback/ConnectionStatus'
 import { AppBackground } from '../components/placeholders/AppBackground'
 import { CharacterPlaceholder } from '../components/placeholders/CharacterPlaceholder'
 import { RouteInspector } from '../features/inspector/RouteInspector'
@@ -24,6 +25,8 @@ import { NotFoundPage } from '../pages/NotFoundPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { TaskDetailPage } from '../pages/TaskDetailPage'
 import { TasksPage } from '../pages/TasksPage'
+import { BackendProvider } from './providers/BackendProvider'
+import { useBackend, type BackendStatus } from './providers/backendContext'
 import { ThemeProvider } from './providers/ThemeProvider'
 import { useThemeContext } from './providers/themeContext'
 import { matchPath, navigate, ROUTE_TITLES, useHashLocation } from './router'
@@ -92,10 +95,18 @@ const INSPECTOR_DEFAULT_OPEN: RouteMatch['name'][] = [
   'audit-detail',
 ]
 
+/** 后端状态 → 顶栏连接指示。unknown 表示还没探完，不能显示成已连接。 */
+const CONNECTION_STATE: Record<BackendStatus, ConnectionState> = {
+  checking: 'unknown',
+  online: 'online',
+  offline: 'offline',
+}
+
 function AppShell() {
   const location = useHashLocation()
   const match = useMemo(() => matchPath(location), [location])
   const { mode: themeMode, cycle: cycleTheme } = useThemeContext()
+  const backend = useBackend()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   // 面板开关按路由路径记录：换路由时 path 不匹配，自动回到该路由的默认值，
   // 不需要在 effect 里 setState（也避免多一次渲染）。
@@ -133,6 +144,8 @@ function AppShell() {
           onToggleInspector={toggleInspector}
           themeMode={themeMode}
           onCycleTheme={cycleTheme}
+          connection={CONNECTION_STATE[backend.status]}
+          connectionDetail={backend.error}
         />
       }
       sidebar={
@@ -140,6 +153,8 @@ function AppShell() {
           active={match.name}
           collapsed={sidebarCollapsed}
           activeThreadId={activeThreadId}
+          backendOnline={backend.status === 'online'}
+          backendThreads={backend.threads}
         />
       }
       inspector={inspectorAvailable ? <RouteInspector match={match} /> : undefined}
@@ -160,7 +175,9 @@ function AppShell() {
 export function App() {
   return (
     <ThemeProvider>
-      <AppShell />
+      <BackendProvider>
+        <AppShell />
+      </BackendProvider>
     </ThemeProvider>
   )
 }

@@ -1753,3 +1753,67 @@ code,
     margin-left: 0;
   }
 }
+
+/* ── AI 新增：真实审批卡片里的 diff 预览 ── */
+/* 复核重点：长 diff 必须自己滚，不能把整页撑高；换行保留但允许横向省略。 */
+.approval-diff {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+  border-radius: 8px;
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.04));
+}
+
+/* ── AI 新增：侧栏会话行操作（重命名 / 删除）── */
+/* 复核重点：动作按钮默认隐藏、悬停才出现，避免和"点击进入会话"抢焦点。 */
+.thread-row {
+  position: relative;
+}
+
+.thread-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: none;
+  gap: 2px;
+}
+
+.thread-row:hover .thread-actions,
+.thread-row:focus-within .thread-actions {
+  display: flex;
+}
+
+.thread-actions button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.6;
+}
+
+.thread-actions button:hover {
+  opacity: 1;
+}
+
+.thread-rename {
+  width: 100%;
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+  background: transparent;
+  color: inherit;
+}
+
+.thread-error {
+  margin: 6px 8px;
+  font-size: 12px;
+  color: var(--danger, #b42318);
+}

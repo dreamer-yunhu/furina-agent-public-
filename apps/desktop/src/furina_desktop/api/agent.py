@@ -35,7 +35,7 @@ from furina_desktop.api.contracts import (
     ThreadCreate,
 )
 from furina_desktop.services.agent_thread import create_user_thread, list_user_threads, delete_user_thread, rename_user_thread, \
-    get_owned_threads
+    get_owned_threads, list_thread_executions, list_user_tasks, list_user_approvals
 from furina_desktop.agent.stream import (
     DecisionMismatch,
     agent_resume_stream,
@@ -359,6 +359,209 @@ async def list_threads(
         page = page,
         size = size,
     )
+
+# ── AI 新增：任务 / 审批列表（待人工复核）──
+# 复核重点：
+#   1. 列表一律**按当前用户过滤**（桌面版只有一个本地用户，但接口形状不该依赖这点）。
+#   2. `instruction` 可能很长，列表只回前 200 字；完整内容走详情，别把大字段塞进列表。
+#   3. 审批列表不带 `args_json`（可能含大段文件内容），只给路径与状态。
+@router.get("/tasks")
+async def list_agent_tasks(
+        page: int = Query(default=1, ge=1),
+        size: int = Query(default=20, ge=1, le=100),
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    rows, total = await list_user_tasks(
+        session,
+        user_id=current_user.id,
+        page=page,
+        size=size,
+    )
+    items = [
+        {
+            "id": str(task.id),
+            "thread_id": str(task.thread_id),
+            "thread_title": thread_title,
+            "instruction": (task.instruction or "")[:200],
+            "status": task.status,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+        }
+        for task, thread_title in rows
+    ]
+    return {"items": items, "total": total, "page": page, "size": size}
+
+
+@router.get("/approvals")
+async def list_agent_approvals(
+        page: int = Query(default=1, ge=1),
+        size: int = Query(default=20, ge=1, le=100),
+        status_filter: str | None = Query(default=None, alias="status"),
+        thread_id: uuid.UUID | None = Query(default=None),
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    if status_filter is not None and status_filter not in {
+        item.value for item in ApprovalStatus
+    }:
+        raise HTTPException(
+            status_code=422,  # 与文件内其它参数校验保持一致的写法，避免 starlette 弃用警告
+            detail=f"未知的审批状态: {status_filter}",
+        )
+
+    rows, total = await list_user_approvals(
+        session,
+        user_id=current_user.id,
+        approval_status=status_filter,
+        thread_id=thread_id,
+        page=page,
+        size=size,
+    )
+    items = [
+        {
+            "id": str(approval.id),
+            "task_id": str(approval.task_id),
+            "execution_id": str(approval.execution_id),
+            "thread_id": str(execution_thread_id),
+            "thread_title": thread_title,
+            "tool_name": approval.tool_name,
+            "target_path": approval.target_path,
+            "approval_status": approval.approval_status,
+            "tool_execution_status": approval.tool_execution_status,
+            "created_at": approval.created_at,
+            "decided_at": approval.decided_at,
+            "decision_reason": approval.decision_reason,
+        }
+        for approval, execution_thread_id, thread_title in rows
+    ]
+    return {"items": items, "total": total, "page": page, "size": size}
+
+
+# ── AI 新增：会话历史（待人工复核）──
+# 复核重点：历史**不是一张消息表**，而是每个 Execution 各自的 checkpoint。
+#   所以这里必须按 thread → executions（时间正序）逐段读 state.messages，
+#   任何"只读最后一次执行"的简化都会让历史缺段。
+_ROLE_BY_TYPE = {
+    "human": "user",
+    "ai": "assistant",
+    "tool": "tool",
+    "system": "system",
+}
+
+
+def _message_text(content) -> str:
+    """LangChain 的 content 可能是 str，也可能是 [{type: text, ...}] 片段列表。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        return "".join(parts)
+    return str(content)
+
+
+@router.get("/threads/{thread_id}/messages")
+async def list_thread_messages(
+        thread_id: uuid.UUID,
+        graph=Depends(get_graph),
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    """读取会话历史。
+
+    只回传**有文本内容**的消息：纯 tool_call 的 AI 消息 content 为空，
+    前端目前没有渲染那种气泡，硬塞进去会得到空行。
+    """
+    await get_owned_threads(
+        session,
+        current_user=current_user,
+        thread_id=thread_id,
+    )
+
+    executions = await list_thread_executions(session, thread_id=thread_id)
+
+    items: list[dict] = []
+    for execution in executions:
+        snapshot = await graph.aget_state(
+            {"configurable": {"thread_id": execution.graph_thread_id}}
+        )
+        values = getattr(snapshot, "values", None) or {}
+        segment: list[dict] = []
+        for message in values.get("messages", []):
+            role = _ROLE_BY_TYPE.get(getattr(message, "type", ""))
+            text = _message_text(getattr(message, "content", ""))
+            if role is None or not text.strip():
+                continue
+            segment.append(
+                {
+                    "id": str(getattr(message, "id", "") or ""),
+                    "role": role,
+                    "content": text,
+                    "name": getattr(message, "name", None),
+                    "execution_id": str(execution.id),
+                }
+            )
+
+        # ★ chat 子图的回复不在根 messages 里：它写在子图自己的 chat_messages，
+        #   同时把纯文本结果回填到根 state 的 `result`（见 agent/nodes/chat.py）。
+        #   所以历史必须把 `result` 当作本轮助手回复补进来，否则只剩用户的话。
+        result_text = (values.get("result") or "").strip()
+        already = segment and segment[-1]["role"] == "assistant" and segment[-1]["content"] == result_text
+        if result_text and not already:
+            segment.append(
+                {
+                    "id": "",
+                    "role": "assistant",
+                    "content": result_text,
+                    "name": None,
+                    "execution_id": str(execution.id),
+                    "from_result": True,
+                }
+            )
+
+        items.extend(segment)
+
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/threads/{thread_id}/pending")
+async def get_thread_pending(
+        thread_id: uuid.UUID,
+        graph=Depends(get_graph),
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    """查询该会话当前是否停在审批中断上。
+
+    用途：刷新页面后恢复审批卡。没有它，用户一刷新就再也看不到那个中断，
+    只能重新发起（而旧中断还挂在 checkpoint 里）。
+    只看最近一次执行 —— 更早的执行都已经结束。
+    """
+    await get_owned_threads(
+        session,
+        current_user=current_user,
+        thread_id=thread_id,
+    )
+
+    executions = await list_thread_executions(session, thread_id=thread_id)
+    for execution in reversed(executions):
+        snapshot = await graph.aget_state(
+            {"configurable": {"thread_id": execution.graph_thread_id}}
+        )
+        interrupts = getattr(snapshot, "interrupts", None) or ()
+        if not interrupts:
+            continue
+        first = interrupts[0]
+        value = first.value if isinstance(first.value, dict) else {}
+        return {"pending": {"interrupt_id": first.id, "review": value}}
+
+    return {"pending": None}
+
 
 @router.delete("/threads/{thread_id}")
 async def delete_thread(

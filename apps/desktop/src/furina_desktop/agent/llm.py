@@ -3,10 +3,19 @@
 """
 from furina_core.config import settings
 from langchain_openai import ChatOpenAI
+
+# <- AI 改动（T4 打包）：缺 key 不再让**导入**失败。
+#    原写法 `api_key=settings.api_key` 在没配 .env 的机器上会让 ChatOpenAI
+#    在模块导入期抛 OpenAIError，后端连 /healthz 都起不来 —— 用户看到的是
+#    "未连接"，完全无法诊断。改用占位 key：进程能起、healthz 会报
+#    llm_key_configured=false，真正的 401 推迟到调用模型时，经 SSE error 帧
+#    回到界面。复核重点：这只是"可诊断"，不是"能用"——没有真 key 依然聊不了。
+_UNSET_API_KEY = "not-configured"
+
 llm = ChatOpenAI(
     model="deepseek-v4-flash",
     base_url=settings.base_url,
-    api_key=settings.api_key,
+    api_key=settings.api_key or _UNSET_API_KEY,
 )
 
 # <- AI 新增（Stage A）：主管内部用的模型实例。
@@ -19,6 +28,6 @@ llm = ChatOpenAI(
 supervisor_llm = ChatOpenAI(
     model="deepseek-v4-flash",
     base_url=settings.base_url,
-    api_key=settings.api_key,
+    api_key=settings.api_key or _UNSET_API_KEY,
     disable_streaming=True,
 )

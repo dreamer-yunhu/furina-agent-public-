@@ -93,8 +93,17 @@ npm run build          # tsc 类型检查 + vite 产物到 dist/
 npm run test           # vitest run（路由 / 导航 / 插槽 / 审批卡片）
 npm run lint           # oxlint
 npm run tauri:dev      # 起 Tauri 窗口（会自己拉起 vite dev server）
-npm run tauri:build    # 出安装包（msi / nsis）
+npm run build:backend  # 用 PyInstaller 把 Python 后端打成 exe（约 90s）
+npm run tauri:build    # 出 NSIS 安装包（会把后端 exe 一并打进去）
+npm run verify:release # 冒烟验收：断言页面来自内置资源，而不是 localhost 或错误页
+npm run release        # 构建 + 验收（发布前只认这个入口）
 ```
+
+> ⚠️ **不要用 `cargo build --release` 直接出包。** `custom-protocol` 是 Tauri 的
+> 非默认 feature，`tauri build` 会自动带上；绕过 CLI 编出来的二进制是 dev 模式：
+> 窗口正常打开，但 WebView2 加载的是 `http://localhost:1420`，没起 dev server
+> 时显示 Edge 的 `ERR_CONNECTION_REFUSED` 页面。这个坑 2026-10-27 实际踩过一次，
+> `npm run verify:release` 就是为它加的闸门。
 
 ## 设计约束
 

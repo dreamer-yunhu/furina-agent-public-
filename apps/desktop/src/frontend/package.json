@@ -12,7 +12,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "build:backend": "..\\..\\..\\..\\.venv\\Scripts\\python.exe ../../../../scripts/build_backend.py",
+    "verify:release": "node scripts/verify-release.mjs",
+    "release": "npm run build:backend && tauri build && node scripts/verify-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

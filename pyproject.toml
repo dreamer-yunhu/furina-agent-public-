@@ -16,3 +16,7 @@ name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
 
+
+[dependency-groups]
+# T4：把后端打成 exe 用的构建工具（不是运行时依赖）
+dev = ["pyinstaller>=6.22", "pytest>=8.3"]

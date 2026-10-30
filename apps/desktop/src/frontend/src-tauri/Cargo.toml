@@ -15,11 +15,24 @@ name = "furina_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.7.4" }
+tauri-build = { version = "2.7.4", features = [] }
+
+# 仅 Windows：用 Job Object 保证"应用被强杀时后端跟着死"（KILL_ON_JOB_CLOSE）。
+# 这比在退出回调里 kill 更硬：后者在 taskkill /F 或崩溃时根本不会执行。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION / CreateJobObjectW 被 gate 在这个 feature 后面
+  "Win32_System_Threading",
+  "Win32_Security",
+] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.12.5" }
+tauri = { version = "2.12.5", features = [] }
 tauri-plugin-log = "2"
+# T6：系统凭据库（Windows Credential Manager），密钥不落明文文件
+keyring = { version = "3", default-features = false, features = ["windows-native"] }

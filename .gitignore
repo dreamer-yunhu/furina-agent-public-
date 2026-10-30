@@ -62,3 +62,7 @@ docs/review/
 # 注意：backend/_t_review.py / _exp_a6.py / _demo_prompt.py 这类开发脚手架未被忽略，
 #       提交前必须显式排除，别用 git add -A
 # 该文件作用：告诉 Git 忽略虚拟环境、密钥、数据库缓存等不应提交的目录和文件
+
+# ── T4 后端打包产物（体积大，不入库）──
+dist-backend/
+build-backend/

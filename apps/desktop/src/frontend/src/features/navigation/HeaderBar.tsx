@@ -1,7 +1,12 @@
 // ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：顶栏按 Codex 原型使用「面包屑 + 演示环境 + 详情面板 + 主题」，
-// 不显示真实连接状态；F2 之前不要伪装后端在线。
+// 复核重点：
+//   1. 连接状态由 BackendProvider 真实探测得出，顶栏**不再写死「演示环境」**。
+//   2. 默认值是 unknown（「连接待检测」），不是 online —— 没探完就不能显示已连接。
 
+import {
+  ConnectionStatus,
+  type ConnectionState,
+} from '../../components/feedback/ConnectionStatus'
 import { Icon } from '../../components/ui/Icon'
 import type { IconName } from '../../components/ui/Icon'
 import { IconButton } from '../../components/ui/IconButton'
@@ -22,6 +27,9 @@ interface HeaderBarProps {
   onToggleInspector: () => void
   themeMode: ThemeMode
   onCycleTheme: () => void
+  /** 本地后端连接状态；未传时按 unknown 处理，不假设在线 */
+  connection?: ConnectionState
+  connectionDetail?: string
 }
 
 export function HeaderBar({
@@ -33,6 +41,8 @@ export function HeaderBar({
   onToggleInspector,
   themeMode,
   onCycleTheme,
+  connection = 'unknown',
+  connectionDetail,
 }: HeaderBarProps) {
   return (
     <div className="header-bar">
@@ -51,10 +61,7 @@ export function HeaderBar({
       </div>
 
       <div className="top-actions">
-        <div className="status">
-          <span className="dot green" aria-hidden="true" />
-          演示环境
-        </div>
+        <ConnectionStatus state={connection} detail={connectionDetail} />
         {inspectorAvailable ? (
           <button
             type="button"

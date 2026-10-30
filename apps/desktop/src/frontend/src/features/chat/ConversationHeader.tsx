@@ -7,11 +7,14 @@ import type { DemoThread } from '../../demo/types'
 interface ConversationHeaderProps {
   thread?: DemoThread
   threadId?: string
+  /** true 时说明数据来自本地后端，不能再挂「Demo 数据」标签 */
+  backendMode?: boolean
 }
 
 export function ConversationHeader({
   thread,
   threadId,
+  backendMode = false,
 }: ConversationHeaderProps) {
   const pending = thread?.pendingApprovals ?? 0
   const id = thread?.id ?? threadId
@@ -24,13 +27,15 @@ export function ConversationHeader({
           <span className="tag">
             线程 · {id ?? 'new-chat'}
           </span>
-          {pending ? (
+          {backendMode ? null : pending ? (
             <span className="tag amber">● {pending} 项待审批</span>
           ) : (
             <span className="tag green">✓ 无待审批</span>
           )}
-          <span className="tag">Demo 数据</span>
-          <span>最近活动 {thread?.updatedAt ?? '刚刚'}</span>
+          <span className="tag">{backendMode ? '真实数据' : 'Demo 数据'}</span>
+          {backendMode ? null : (
+            <span>最近活动 {thread?.updatedAt ?? '刚刚'}</span>
+          )}
         </div>
       </div>
       <Link className="pill-btn" to="/audit">

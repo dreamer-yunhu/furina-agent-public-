@@ -19,6 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from furina_core.checkpoint import CheckpointStore
 from furina_core.models import User, AgentThreadID
+from furina_core.task.models import AgentTask, AgentExecution, ApprovalRequest
 from furina_desktop.api.contracts import ThreadCreate
 
 # ⚠️ AI 改动：原来的 `from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver`
@@ -249,3 +250,82 @@ async def db_delete_thread(
 
 
 
+
+
+# ── AI 新增：线程历史消息的数据来源（待人工复核）──
+# 复核重点：历史**不在**会话表里，而是散在每次 Execution 各自的 LangGraph
+#   checkpoint 中（graph_thread_id 默认等于 execution_id）。所以顺序必须是
+#   thread → tasks（时间正序）→ executions（时间正序）→ 各自 state.messages。
+#   漏掉任何一层，历史就会缺段或顺序错乱。
+async def list_thread_executions(
+        session: AsyncSession,
+        *,
+        thread_id: uuid.UUID,
+) -> list[AgentExecution]:
+    """按时间正序返回该线程下所有执行（跨任务）。"""
+    stmt = (
+        select(AgentExecution)
+        .join(AgentTask, AgentExecution.task_id == AgentTask.id)
+        .where(AgentTask.thread_id == thread_id)
+        .order_by(AgentTask.created_at, AgentExecution.created_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+# ── AI 新增：任务 / 审批的列表查询（待人工复核）──
+# 复核重点：**必须按 user_id 过滤**。core 的 `list_tasks` / `list_approvals`
+#   不带归属条件，直接拿来用会把所有用户的数据都吐出来；桌面版目前虽只有
+#   一个本地用户，但接口形状不能依赖这一点。
+async def list_user_tasks(
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        page: int = 1,
+        size: int = 20,
+) -> tuple[list[tuple[object, str]], int]:
+    """返回 ([(AgentTask, thread_title)], total)。"""
+    base = (
+        select(AgentTask, AgentThreadID.title)
+        .join(AgentThreadID, AgentTask.thread_id == AgentThreadID.id)
+        .where(AgentThreadID.user_id == user_id)
+    )
+    total = int(await session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+    rows = (
+        await session.execute(
+            base.order_by(AgentTask.created_at.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+    ).all()
+    return [(row[0], row[1]) for row in rows], total
+
+
+async def list_user_approvals(
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        approval_status: str | None = None,
+        thread_id: uuid.UUID | None = None,
+        page: int = 1,
+        size: int = 20,
+) -> tuple[list[tuple[object, uuid.UUID, str]], int]:
+    """返回 ([(ApprovalRequest, thread_id, thread_title)], total)。"""
+    base = (
+        select(ApprovalRequest, AgentTask.thread_id, AgentThreadID.title)
+        .join(AgentTask, ApprovalRequest.task_id == AgentTask.id)
+        .join(AgentThreadID, AgentTask.thread_id == AgentThreadID.id)
+        .where(AgentThreadID.user_id == user_id)
+    )
+    if approval_status is not None:
+        base = base.where(ApprovalRequest.approval_status == approval_status)
+    if thread_id is not None:
+        base = base.where(AgentTask.thread_id == thread_id)
+    total = int(await session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+    rows = (
+        await session.execute(
+            base.order_by(ApprovalRequest.created_at.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+    ).all()
+    return [(row[0], row[1], row[2]) for row in rows], total

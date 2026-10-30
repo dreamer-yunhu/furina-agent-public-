@@ -60,6 +60,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -162,20 +163,58 @@ def _setup_logging() -> None:
     """配置日志。**只在 run() 里调用**，不在 import 期。
 
     ⚠️ 与 web 入口同一处理由：不在 import 期写文件（旧实现踩过这个坑）。
+
+    ← D1.1 改动：除文件外**再加一个 stderr 处理器（WARNING 及以上）**。
+    理由：日志文件本身可能写不进去（目录只读/磁盘满），或者错误发生在
+    `basicConfig` 生效之前。这两类情况下 stderr 是唯一还活着的信息通道，
+    而 Tauri 侧已把子进程 stderr 重定向到 `backend.stderr.log`。
+    复核重点：WARNING 及以上会**同时**出现在 desktop.log 与 backend.stderr.log，
+    重复是有意的（两个排障入口各自独立可读）。
     """
     settings.log_dir.mkdir(parents=True, exist_ok=True)
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    file_handler = logging.FileHandler(
+        settings.log_dir / "desktop.log", mode="a", encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(formatter)
+
+    # force=True：避免重复 import / 测试环境已经配置过 root 导致本次配置被忽略
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        filename=str(settings.log_dir / "desktop.log"),
-        filemode="a",
-        encoding="utf-8",
+        handlers=[file_handler, stderr_handler],
+        force=True,
     )
+
     # ⚠️ 这两行是**防密钥泄漏**的关键：
     #    httpx / openai 在 DEBUG 下会打印请求头，而请求头里有
     #    `Authorization: Bearer sk-...`。桌面版的日志就落在用户硬盘上。
     for noisy in ("httpx", "httpcore", "openai", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def _log_startup_banner() -> None:
+    """记录后端启动现场（← D1.1 新增）。
+
+    ⚠️ 只记录"密钥是否配置"，**绝不记录密钥值**。
+    """
+    logger.info("=" * 62)
+    logger.info("Python 后端启动")
+    logger.info("  pid:       %s", os.getpid())
+    logger.info("  解释器:    %s", sys.executable)
+    logger.info("  冻结包:    %s", bool(getattr(sys, "frozen", False)))
+    logger.info("  工作目录:  %s", os.getcwd())
+    logger.info("  日志文件:  %s", (settings.log_dir / "desktop.log").resolve())
+    logger.info("  模型:      %s", settings.model)
+    logger.info("  密钥:      %s", "已配置" if settings.api_key else "缺失")
+    logger.info("  沙箱根:    %s", settings.sandbox_root)
+    logger.info("=" * 62)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -190,77 +229,103 @@ async def lifespan(app: FastAPI):
     """
     logger.info("桌面版启动中")
 
-    # ⓪ 沙箱根（问题 1）
-    # <- AI 改动：`.env` 指向的 SANDBOX_ROOT 可能不存在（全新环境就是），
-    #    不建的话第一次写入必然 Errno 2，而审批预览已经正常生成了。
-    #    复核重点：这里失败要拒绝启动 —— 没有沙箱的文件工具不应该上线。
+    # <- D1.1 改动：整个启动段包一层 try/except，任何未被下游吞掉的异常
+    #    都会带 exc_info 打成 CRITICAL 再原样抛出。
+    #    复核重点：**这里是"记录"，不是"兜底"** —— 异常必须继续上抛，
+    #    让 uvicorn 以非零码退出，否则"启动失败"会变成"起来了但没图"。
+    startup_started = time.monotonic()
     try:
-        root = ensure_sandbox_root()
-        logger.info("沙箱根就绪：%s", root)
-    except OSError as exc:
-        logger.critical("沙箱根创建失败，拒绝启动：%s", exc)
+        # ⓪ 沙箱根（问题 1）
+        # <- AI 改动：`.env` 指向的 SANDBOX_ROOT 可能不存在（全新环境就是），
+        #    不建的话第一次写入必然 Errno 2，而审批预览已经正常生成了。
+        #    复核重点：这里失败要拒绝启动 —— 没有沙箱的文件工具不应该上线。
+        logger.info("[阶段 1/6] 准备沙箱根")
+        try:
+            root = ensure_sandbox_root()
+            logger.info("沙箱根就绪：%s", root)
+        except OSError as exc:
+            logger.critical("沙箱根创建失败，拒绝启动：%s", exc)
+            raise
+
+        # ① 业务库（user / thread / task / execution / approval）
+        # <- AI 改动：新增这一步。原来 desktop 从未设置 app.state.async_session，
+        #    导致 get_session 在第一个请求就 AttributeError（阶段 1 报告 B8）。
+        logger.info("[阶段 2/6] 初始化业务数据库")
+        try:
+            await init_db(app)
+            # 刻意不打印连接串：SQLite 是路径，将来若换回 PG，URL 里可能带口令
+            logger.info("业务数据库就绪")
+        except Exception as exc:
+            logger.critical("业务数据库初始化失败，拒绝启动：%s", exc)
+            raise
+
+        # ①.5 运行时适配层（T23）：审批落库与执行生命周期。
+        # 放在业务库之后、图之前：节点执行时通过 provider 取它。
+        logger.info("[阶段 3/6] 装配运行时适配层（T23）")
+        app.state.agent_runtime = AgentRuntime(
+            app.state.async_session,
+            workspace_root=settings.sandbox_root,
+            approval_timeout_seconds=settings.approval_timeout_seconds,
+        )
+        set_runtime(app.state.agent_runtime)
+        logger.info(
+            "运行时适配层就绪：approval_timeout=%ss",
+            app.state.agent_runtime.approval_timeout_seconds,
+        )
+
+        # ② checkpoint 存储
+        logger.info("[阶段 4/6] 初始化 checkpoint 存储")
+        try:
+            await init_checkpoint_store(app)
+            logger.info("checkpoint 存储就绪")
+        except Exception as exc:
+            logger.critical("SQLite checkpoint 初始化失败，拒绝启动：%s", exc)
+            await close_db(app)  # 回滚①
+            raise
+
+        # ③ 组装主管图。⚠️ 这是**编排层**的活，放在入口而不是存储层 ——
+        # 见 storage/lifespan.py 的模块 docstring（那里解释过为什么拆开）。
+        logger.info("[阶段 5/6] 编译主管图")
+        try:
+            from furina_desktop.agent.build import build_graph
+
+            app.state.graph = build_graph(app.state.checkpoint_store)
+            logger.info("主管图已编译，checkpointer = SQLite")
+        except Exception as exc:
+            # 图装不起来也要回滚存储，否则 SQLite 文件句柄会留着
+            logger.critical("主管图装配失败，拒绝启动：%s", exc)
+            await close_checkpoint_store(app)
+            await close_db(app)
+            raise
+
+        # ④ 审批超时扫描（T21）。⚠️ 它是项目里第一个常驻协程：
+        #    启动失败不应拖垮应用，配置非法只降级 + ERROR 日志。
+        # <- AI 改动：放在图组装之后、yield 之前；关闭时必须先停它再关存储，
+        #    否则扫描器可能拿着已关闭的 session factory 再扫一轮。
+        logger.info("[阶段 6/6] 启动审批超时扫描")
+        app.state.timeout_scanner_status = start_timeout_scanner(
+            app,
+            session_factory=app.state.async_session,
+            interval=settings.approval_scan_interval_seconds,
+            batch=settings.approval_scan_batch_size,
+        )
+        logger.info("审批超时扫描：%s", app.state.timeout_scanner_status)
+
+    except Exception:
+        logger.critical(
+            "lifespan 启动失败（已进行 %.2fs），后端即将退出",
+            time.monotonic() - startup_started,
+            exc_info=True,
+        )
         raise
 
-    # ① 业务库（user / thread / task / execution / approval）
-    # <- AI 改动：新增这一步。原来 desktop 从未设置 app.state.async_session，
-    #    导致 get_session 在第一个请求就 AttributeError（阶段 1 报告 B8）。
-    try:
-        await init_db(app)
-    except Exception as exc:
-        logger.critical("业务数据库初始化失败，拒绝启动：%s", exc)
-        raise
-
-    # ①.5 运行时适配层（T23）：审批落库与执行生命周期。
-    # 放在业务库之后、图之前：节点执行时通过 provider 取它。
-    app.state.agent_runtime = AgentRuntime(
-        app.state.async_session,
-        workspace_root=settings.sandbox_root,
-        approval_timeout_seconds=settings.approval_timeout_seconds,
-    )
-    set_runtime(app.state.agent_runtime)
     logger.info(
-        "运行时适配层就绪：approval_timeout=%ss",
-        app.state.agent_runtime.approval_timeout_seconds,
+        "lifespan 启动成功（用时 %.2fs），就绪，开始接收请求",
+        time.monotonic() - startup_started,
     )
-
-    # ② checkpoint 存储
-    try:
-        await init_checkpoint_store(app)
-    except Exception as exc:
-        logger.critical("SQLite checkpoint 初始化失败，拒绝启动：%s", exc)
-        await close_db(app)  # 回滚①
-        raise
-
-    # ③ 组装主管图。⚠️ 这是**编排层**的活，放在入口而不是存储层 ——
-    # 见 storage/lifespan.py 的模块 docstring（那里解释过为什么拆开）。
-    try:
-        from furina_desktop.agent.build import build_graph
-
-        app.state.graph = build_graph(app.state.checkpoint_store)
-        logger.info("主管图已编译，checkpointer = SQLite")
-    except Exception as exc:
-        # 图装不起来也要回滚存储，否则 SQLite 文件句柄会留着
-        logger.critical("主管图装配失败，拒绝启动：%s", exc)
-        await close_checkpoint_store(app)
-        await close_db(app)
-        raise
-
-    # ④ 审批超时扫描（T21）。⚠️ 它是项目里第一个常驻协程：
-    #    启动失败不应拖垮应用，配置非法只降级 + ERROR 日志。
-    # <- AI 改动：放在图组装之后、yield 之前；关闭时必须先停它再关存储，
-    #    否则扫描器可能拿着已关闭的 session factory 再扫一轮。
-    app.state.timeout_scanner_status = start_timeout_scanner(
-        app,
-        session_factory=app.state.async_session,
-        interval=settings.approval_scan_interval_seconds,
-        batch=settings.approval_scan_batch_size,
-    )
-    logger.info("审批超时扫描：%s", app.state.timeout_scanner_status)
-
-    logger.info("就绪，开始接收请求")
     yield
 
-    logger.info("关闭中…")
+    logger.info("关闭中…（收到 lifespan 关闭信号）")
     # 关闭顺序与初始化相反：先停后台任务，再关存储
     await stop_timeout_scanner(app)
     await close_checkpoint_store(app)
@@ -334,6 +399,8 @@ def run() -> None:
     import uvicorn
 
     _setup_logging()
+    # <- AI 改动（D1.1）：启动现场（pid/解释器/cwd/密钥是否配置）打在最早的位置
+    _log_startup_banner()
 
     lock = SingleInstanceLock(_lock_path())
     if not lock.acquire():
@@ -341,6 +408,7 @@ def run() -> None:
         print("芙宁娜已在运行中（检测到单实例锁）。", file=sys.stderr)
         # TODO: 通知已有实例把窗口拿到前台 —— 需要 Tauri 侧提供一个 IPC 端点
         sys.exit(0)
+    logger.info("单实例锁已获取：%s", _lock_path().resolve())
 
     try:
         # ⚠️ 只监听回环地址。桌面版的服务**不应该**被局域网访问。
@@ -354,7 +422,17 @@ def run() -> None:
             )
         port = int(os.getenv("DESKTOP_PORT", "8001"))
         logger.info("启动 uvicorn: http://%s:%d", host, port)
+        # <- D1.1：uvicorn 自己的启动/关闭日志走它自己的 logger（输出到 stderr），
+        #    本模块的日志走 desktop.log —— 两条通道都由 Rust 侧落盘。
         uvicorn.run("furina_desktop.main:app", host=host, port=port, reload=False)
+        logger.info("uvicorn 已正常退出")
+    except SystemExit:
+        # sys.exit(0) 是正常路径，别把它记成启动失败
+        raise
+    except Exception:
+        # <- D1.1：启动路径上的异常必须留痕再上抛，不允许静默退出。
+        logger.critical("后端启动失败，进程即将退出", exc_info=True)
+        raise
     finally:
         lock.release()
 

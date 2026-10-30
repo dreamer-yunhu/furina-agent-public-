@@ -46,21 +46,38 @@ web 的数据库配置在 `furina_web.config`（继承本文件，见那里的�
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 
 def _find_dotenv() -> Path | None:
-    """向上找 .env，最多走 5 层（适配 packages/core、apps/web 这种嵌套深度）。
+    """找 .env。开发态向上找 5 层；打包态（PyInstaller）按"用户配置优先"找。
 
-    ⚠️ 这是启发式：它在**开发时**很有用（跑测试不必手工设环境变量），
-    但**打包后可能找到意外位置的 .env**。桌面版发布的正确做法是
-    用户配置目录（`%APPDATA%\\furina-agent\\`），不是向上找。
+    ⚠️ 这是启发式：在**开发时**很有用（跑测试不必手工设环境变量）。
+    **打包后不能向上找** —— 冻结包的 `__file__` 指向临时解压目录
+    （`%TEMP%\\_MEIxxxx`），沿父目录找只会找到临时目录。
+
+    打包后（T4 实测踩过）按这个顺序：
+      ① 可执行文件同级的 .env        —— 便携部署
+      ② 当前工作目录的 .env          —— Tauri 拉起时 cwd 是自己指定的数据目录
+      ③ %APPDATA%\\furina-agent\\.env —— 用户配置目录（文档里推荐的位置）
     """
-    here = Path(__file__).resolve()
-    for parent in list(here.parents)[:5]:
-        candidate = parent / ".env"
+    candidates: list[Path] = []
+
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / ".env")
+        candidates.append(Path.cwd() / ".env")
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "furina-agent" / ".env")
+    else:
+        here = Path(__file__).resolve()
+        for parent in list(here.parents)[:5]:
+            candidates.append(parent / ".env")
+
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
