@@ -10,8 +10,8 @@
 |---|---|
 | 安装包 | [`furina-desktop_1.1.0_x64-setup.exe`](https://github.com/dreamer-yunhu/furina-agent-public-/releases/latest) |
 | 平台 | Windows 10 / 11 x64（WebView2 由安装器内置引导安装） |
-| 大小 | 55.5 MiB |
-| SHA-256 | `d4eed6e1b8625fa1fb000971dccbcffe27327d862d1c4e6238893c61df762e61` |
+| 大小 | 55.55 MiB |
+| SHA-256 | `48c83a1a116d32f95ad3d5f93c7cbafdb70037be9af705918abcc94d46bd0abf` |
 
 安装后双击启动即可：应用会自动拉起内置的 Python 后端，无需另外装 Python 或数据库。
 
@@ -69,8 +69,8 @@ uv run --package furina-desktop python -m furina_desktop
 | 审批恢复入口（`/agent/resume`） | ✅ 已实现（T23 链路，404/409 三判据） |
 | 桌面进程托管 | ✅ Tauri 拉起并回收 Python 后端（Job Object 兜底强杀） |
 | 启动可观测性 | ✅ 应用/子进程/后端三路日志落盘（1.1.0） |
-| 前端会话与列表 | ✅ 会话、任务、审计列表走真实接口；空列表显示空状态 |
-| 前端详情页 | ⚠️ 任务/执行/审计详情仍为演示数据（待接） |
+| 前端数据接入 | ✅ 会话/任务/审计/审批全部走真实接口，**无演示数据** |
+| 前端详情页 | ✅ 任务/执行/审计/审批详情已接后端（1.1.0 构建 2） |
 
 ## 必读文档
 
