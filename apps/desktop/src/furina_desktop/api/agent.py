@@ -35,7 +35,9 @@ from furina_desktop.api.contracts import (
     ThreadCreate,
 )
 from furina_desktop.services.agent_thread import create_user_thread, list_user_threads, delete_user_thread, rename_user_thread, \
-    get_owned_threads, list_thread_executions, list_user_tasks, list_user_approvals
+    get_owned_threads, list_thread_executions, list_user_tasks, list_user_approvals, \
+    get_user_task, list_task_executions, list_task_approvals, \
+    get_user_execution, list_execution_approvals, get_user_approval
 from furina_desktop.agent.stream import (
     DecisionMismatch,
     agent_resume_stream,
@@ -369,12 +371,14 @@ async def list_threads(
 async def list_agent_tasks(
         page: int = Query(default=1, ge=1),
         size: int = Query(default=20, ge=1, le=100),
+        thread_id: uuid.UUID | None = Query(default=None),
         session: AsyncSession = Depends(get_session),
         current_user: User = Depends(get_current_user),
 ):
     rows, total = await list_user_tasks(
         session,
         user_id=current_user.id,
+        thread_id=thread_id,
         page=page,
         size=size,
     )
@@ -436,6 +440,108 @@ async def list_agent_approvals(
         for approval, execution_thread_id, thread_title in rows
     ]
     return {"items": items, "total": total, "page": page, "size": size}
+
+
+# ── 详情接口（← 前端去 demo 后新增）────────────────────────────────
+# 复核重点：
+#   1. 三个 detail 接口都返回**完整 instruction**，列表接口才截断 200 字。
+#   2. 一律按当前用户归属过滤；查不到 404，不区分"不存在"与"不是你的"。
+#   3. executions 按创建时间正序 —— 历史不覆盖旧记录是本项目的既有约定。
+
+def _task_payload(task, thread_title: str, *, full: bool) -> dict:
+    instruction = task.instruction or ""
+    return {
+        "id": str(task.id),
+        "thread_id": str(task.thread_id),
+        "thread_title": thread_title,
+        "instruction": instruction if full else instruction[:200],
+        "status": task.status,
+        "failure_reason": task.failure_reason,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def _execution_payload(execution) -> dict:
+    return {
+        "id": str(execution.id),
+        "task_id": str(execution.task_id),
+        "status": execution.status,
+        "graph_thread_id": execution.graph_thread_id,
+        "validation_failure_reason": execution.validation_failure_reason,
+        "created_at": execution.created_at,
+        "finished_at": execution.finished_at,
+    }
+
+
+def _approval_payload(approval, thread_id, thread_title: str) -> dict:
+    return {
+        "id": str(approval.id),
+        "task_id": str(approval.task_id),
+        "execution_id": str(approval.execution_id),
+        "thread_id": str(thread_id),
+        "thread_title": thread_title,
+        "tool_name": approval.tool_name,
+        "target_path": approval.target_path,
+        "approval_status": approval.approval_status,
+        "tool_execution_status": approval.tool_execution_status,
+        "created_at": approval.created_at,
+        "decided_at": approval.decided_at,
+        "decision_reason": approval.decision_reason,
+    }
+
+
+@router.get("/tasks/{task_id}")
+async def get_agent_task(
+        task_id: uuid.UUID,
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    task, thread_title = await get_user_task(
+        session, user_id=current_user.id, task_id=task_id
+    )
+    executions = await list_task_executions(session, task_id=task.id)
+    approvals = await list_task_approvals(session, task_id=task.id)
+    payload = _task_payload(task, thread_title, full=True)
+    payload["executions"] = [_execution_payload(item) for item in executions]
+    payload["approvals"] = [
+        _approval_payload(item, task.thread_id, thread_title) for item in approvals
+    ]
+    return payload
+
+
+@router.get("/executions/{execution_id}")
+async def get_agent_execution(
+        execution_id: uuid.UUID,
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    execution, task, thread_title = await get_user_execution(
+        session, user_id=current_user.id, execution_id=execution_id
+    )
+    approvals = await list_execution_approvals(session, execution_id=execution.id)
+    payload = _execution_payload(execution)
+    payload["thread_id"] = str(task.thread_id)
+    payload["thread_title"] = thread_title
+    payload["task"] = _task_payload(task, thread_title, full=False)
+    payload["approvals"] = [
+        _approval_payload(item, task.thread_id, thread_title) for item in approvals
+    ]
+    return payload
+
+
+@router.get("/approvals/{approval_id}")
+async def get_agent_approval(
+        approval_id: uuid.UUID,
+        session: AsyncSession = Depends(get_session),
+        current_user: User = Depends(get_current_user),
+):
+    approval, task, thread_title = await get_user_approval(
+        session, user_id=current_user.id, approval_id=approval_id
+    )
+    payload = _approval_payload(approval, task.thread_id, thread_title)
+    payload["task"] = _task_payload(task, thread_title, full=False)
+    return payload
 
 
 # ── AI 新增：会话历史（待人工复核）──

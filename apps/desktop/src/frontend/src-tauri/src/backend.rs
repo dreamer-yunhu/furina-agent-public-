@@ -379,6 +379,21 @@ fn spawn(exe: &Path, cwd: &Path, log_dir: &Path) -> Option<Child> {
 
     let mut command = Command::new(exe);
     command.current_dir(cwd);
+
+    // ← D1.2 修复：**不要让子进程创建控制台**。
+    // 实测症状：从资源管理器/`Start-Process` 启动应用（父进程是无控制台的 GUI
+    // 程序）时，Windows 会给 console 子进程分配一个新控制台；一旦该控制台被
+    // 宿主回收/关闭，后端就会以 0xC000013A（STATUS_CONTROL_C_EXIT）退出 ——
+    // 表现为"后端 READY 之后几秒突然消失"，且从终端启动时复现不了。
+    // CREATE_NO_WINDOW (0x08000000) 让它完全不要控制台；stdio 已经重定向到
+    // 文件，所以不影响日志采集。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
     redirect_stdio(&mut command, log_dir);
 
     // T6：密钥从系统凭据库读，经**环境变量**下发给后端。

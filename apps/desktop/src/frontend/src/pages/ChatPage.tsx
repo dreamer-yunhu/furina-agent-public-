@@ -1,21 +1,18 @@
-// ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
+// ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
 // 复核重点：
-//   1. 两条数据路径必须分清：Demo 会话（id 在 demo/data.ts 里）与真实会话
-//      （后端 agent_thread 表）。**不能靠"该 id 有没有 demo 数据"来猜在线与否**，
-//      必须同时看 backend.status。
-//   2. 真实会话的历史由后端按每次执行拼出来，前端只做映射；不要在前端再拼一次。
-//   3. 流式期间 token 是增量到达的，用累加变量 `acc` 收尾，避免多处读 state 造成丢字。
-//   4. 审批是**两步**：先 /agent/decisions 落库，再 /agent/resume 续跑。
-//      顺序反了会丢审计（决定没落库但图已经跑完）。
-//   5. 页面重新挂载会丢掉"待审批"状态（后端没有"查询挂起项"的接口）。
-//      这是已知缺口：审批做到一半刷新页面，卡片不会再出现。
+//   1. ★ 删掉 demo 会话的整条分支，只保留真实后端一条路径。
+//      `/chat`（尚无 threadId）发送第一条消息时**自动建线程再发送**：
+//      先 POST /agent/threads，把待发文本存到模块级变量，navigate 到新线程，
+//      由新挂载的页面接管发送（App 用 threadId 当 key，必然重挂载）。
+//      为什么不在旧实例里直接发：旧实例会被卸载，流式内容会丢。
+//   2. 审批仍是两步：先 /agent/decisions 落库，再 /agent/resume 续跑。
+//   3. 未连接时明确报错，不再落入"本地演示消息"。
 
 import { useEffect, useRef, useState } from 'react'
 
 import { Link } from '../app/Link'
+import { navigate } from '../app/router'
 import { useBackend } from '../app/providers/backendContext'
-import { getDemoMessages, getDemoThread, demoThreads } from '../demo/data'
-import type { DemoMessage, DemoThread } from '../demo/types'
 import { Composer } from '../features/chat/Composer'
 import { ConversationHeader } from '../features/chat/ConversationHeader'
 import { MessageList } from '../features/chat/MessageList'
@@ -24,12 +21,20 @@ import { getPending } from '../services/api/activity'
 import { resumeChat, submitDecisions } from '../services/api/approvals'
 import { streamChat } from '../services/api/chat'
 import { listMessages } from '../services/api/messages'
+import { createThread } from '../services/api/threads'
 import type {
   AgentEvent,
   ApiItemDecision,
   ApiMessage,
   ApiReviewRequest,
 } from '../services/api/types'
+import type { ViewMessage } from '../types/view'
+
+/**
+ * 跨"建线程 → 重挂载"的一次性待发文本。
+ * 只在自动建线程时使用；消费后立刻清空，避免刷新页面重复发送。
+ */
+let pendingFirstMessage: string | null = null
 
 interface ChatPageProps {
   threadId?: string
@@ -39,13 +44,12 @@ type HistoryState = 'loading' | 'ready' | 'error'
 
 interface HistorySnapshot {
   state: HistoryState
-  items: DemoMessage[]
+  items: ViewMessage[]
   error?: string
 }
 
-function toViewMessage(message: ApiMessage, index: number): DemoMessage {
+function toViewMessage(message: ApiMessage, index: number): ViewMessage {
   return {
-    // 由 state.result 补出来的那条没有 id，用下标兜底，避免 key 重复
     id: message.id || `hist-${index}`,
     role: message.role === 'assistant' ? 'assistant' : 'user',
     content: message.content,
@@ -53,17 +57,16 @@ function toViewMessage(message: ApiMessage, index: number): DemoMessage {
   }
 }
 
+function titleFrom(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, ' ')
+  return (trimmed.slice(0, 40) || '新会话').slice(0, 255)
+}
+
 export function ChatPage({ threadId }: ChatPageProps) {
   const backend = useBackend()
+  const online = backend.status === 'online'
 
-  const demoThread = threadId ? getDemoThread(threadId) : undefined
-  const isDemoThread = Boolean(demoThread)
-  // 只有"不是 Demo 会话 + 后端在线"才走真实路径
-  const isRealThread = Boolean(threadId) && !isDemoThread && backend.status === 'online'
-
-  const demoMessages = threadId && isDemoThread ? getDemoMessages(threadId) : []
-  const [localMessages, setLocalMessages] = useState<DemoMessage[]>([])
-  const localId = useRef(0)
+  const [localMessages] = useState<ViewMessage[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const [history, setHistory] = useState<HistorySnapshot>({
@@ -71,17 +74,17 @@ export function ChatPage({ threadId }: ChatPageProps) {
     items: [],
   })
 
-  const [streamMessages, setStreamMessages] = useState<DemoMessage[]>([])
+  const [streamMessages, setStreamMessages] = useState<ViewMessage[]>([])
   const [streaming, setStreaming] = useState(false)
   const [streamError, setStreamError] = useState<string | undefined>(undefined)
 
-  // 真实挂起中的审批批次
   const [pendingReview, setPendingReview] = useState<ApiReviewRequest | null>(null)
   const [approvalBusy, setApprovalBusy] = useState(false)
   const [approvalError, setApprovalError] = useState<string | undefined>(undefined)
 
+  // 读取历史（仅真实线程）
   useEffect(() => {
-    if (!isRealThread || !threadId) return
+    if (!threadId || !online) return
 
     let cancelled = false
     listMessages(threadId)
@@ -92,9 +95,7 @@ export function ChatPage({ threadId }: ChatPageProps) {
           .map(toViewMessage)
         setHistory({ state: 'ready', items })
 
-        // 历史读完之后再查一次"是否停在审批中断上"：
-        // 没有这一步，刷新页面就再也看不到那个待审批卡片，只能重新发起。
-        // 失败不改变页面状态 —— 恢复审批是增强，不该让历史也显示成错误。
+        // 刷新页面后恢复"卡在审批中断"的卡片；失败不影响历史显示
         getPending(threadId)
           .then((result) => {
             if (cancelled) return
@@ -103,7 +104,7 @@ export function ChatPage({ threadId }: ChatPageProps) {
             }
           })
           .catch(() => {
-            /* 忽略：见上 */
+            /* 忽略：恢复审批是增强，不该让历史也变成错误 */
           })
       })
       .catch((error: unknown) => {
@@ -118,25 +119,16 @@ export function ChatPage({ threadId }: ChatPageProps) {
     return () => {
       cancelled = true
     }
-  }, [isRealThread, threadId])
+  }, [threadId, online])
 
-  const messages = isDemoThread
-    ? [...demoMessages, ...localMessages]
-    : [...history.items, ...streamMessages]
-
-  const hasConversation = Boolean(threadId)
+  const messages = [...history.items, ...localMessages, ...streamMessages]
 
   useEffect(() => {
     const node = scrollRef.current
-    if (node) {
-      node.scrollTop = node.scrollHeight
-    }
+    if (node) node.scrollTop = node.scrollHeight
   }, [messages.length, streaming, pendingReview])
 
-  /**
-   * 消费一次事件流（新消息或审批续跑都走这里）。
-   * `userText` 只有首次发送时给；续跑时不该再插一条用户消息。
-   */
+  /** 消费一次事件流（新消息或审批续跑都走这里） */
   const runTurn = async (
     events: AsyncGenerator<AgentEvent>,
     userText?: string,
@@ -166,7 +158,6 @@ export function ChatPage({ threadId }: ChatPageProps) {
             ),
           )
         } else if (event.type === 'approval_required') {
-          // 中断：本轮到此为止，等待用户裁决
           setPendingReview(event.review)
         } else if (event.type === 'error') {
           setStreamError(event.message ?? event.code ?? '后端返回错误')
@@ -175,6 +166,7 @@ export function ChatPage({ threadId }: ChatPageProps) {
     } catch (error) {
       setStreamError(error instanceof Error ? error.message : String(error))
     } finally {
+      // 把这一轮落进历史，避免刷新前内容只在 stream 状态里
       setHistory((current) => ({
         ...current,
         items: [
@@ -203,6 +195,15 @@ export function ChatPage({ threadId }: ChatPageProps) {
     await runTurn(streamChat({ user_input: text, chat_thread_id: id }), text)
   }
 
+  // 自动建线程后，由新挂载的页面接管首条消息
+  useEffect(() => {
+    if (!threadId || !online || !pendingFirstMessage) return
+    const text = pendingFirstMessage
+    pendingFirstMessage = null
+    void sendReal(text, threadId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, online])
+
   const handleApprovalSubmit = async (decisions: ApiItemDecision[]) => {
     if (!threadId) return
     setApprovalBusy(true)
@@ -221,30 +222,32 @@ export function ChatPage({ threadId }: ChatPageProps) {
   }
 
   const handleSend = (text: string) => {
-    if (isRealThread && threadId) {
+    if (!online) {
+      setStreamError('未连接本地服务：发送前请先确认后端已启动。')
+      return
+    }
+
+    if (threadId) {
       void sendReal(text, threadId)
       return
     }
 
-    const index = localId.current
-    localId.current += 1
-    setLocalMessages((current) => [
-      ...current,
-      { id: `local-user-${index}`, role: 'user', content: text, at: '刚刚' },
-      {
-        id: `local-system-${index}`,
-        role: 'system',
-        content:
-          backend.status === 'online'
-            ? '这是 Demo 会话：它的消息不会进入后端。请在左侧选择真实会话，或新建后由后端创建。'
-            : '未连接本地服务：这条输入没有发送到任何后端。启动服务后重试。',
-        at: '刚刚',
-      },
-    ])
+    // 尚无会话：先建线程，再把这条消息交给新页面
+    pendingFirstMessage = text
+    createThread(titleFrom(text))
+      .then((created) => {
+        backend.reload()
+        navigate(`/chat/${created.id}`)
+      })
+      .catch((error: unknown) => {
+        pendingFirstMessage = null
+        setStreamError(
+          `创建会话失败：${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
   }
 
-  // 真实会话在离线时不能假装它不存在 —— 要明确说是"连不上"，而不是"没有"
-  if (threadId && !isDemoThread && backend.status !== 'online') {
+  if (threadId && !online) {
     return (
       <div className="chat-page">
         <div className="chat-empty-state">
@@ -267,36 +270,23 @@ export function ChatPage({ threadId }: ChatPageProps) {
     )
   }
 
-  const headerThread: DemoThread | undefined =
-    demoThread ??
-    (threadId
-      ? {
-          id: threadId,
-          title: '已连接会话',
-          preview: '',
-          updatedAt: '',
-          status: 'idle',
-          pendingApprovals: 0,
-        }
-      : undefined)
+  const threadTitle = threadId
+    ? backend.threads.find((item) => item.id === threadId)?.title
+    : undefined
 
   return (
     <div className="chat-page">
-      <ConversationHeader
-        thread={headerThread}
-        threadId={threadId}
-        backendMode={isRealThread}
-      />
+      <ConversationHeader title={threadTitle} threadId={threadId} />
 
       <div className="chat-scroll" ref={scrollRef}>
         <div className="conversation">
-          {hasConversation ? (
-            isRealThread && history.state === 'loading' ? (
+          {threadId ? (
+            history.state === 'loading' ? (
               <div className="chat-empty-state chat-empty-state--inline">
                 <h2>正在加载会话历史…</h2>
                 <p>从本地服务的 checkpoint 读取。</p>
               </div>
-            ) : isRealThread && history.state === 'error' ? (
+            ) : history.state === 'error' ? (
               <div className="chat-empty-state chat-empty-state--inline">
                 <h2>读取历史失败</h2>
                 <p>
@@ -308,11 +298,7 @@ export function ChatPage({ threadId }: ChatPageProps) {
             ) : (
               <div className="chat-empty-state chat-empty-state--inline">
                 <h2>这个会话还没有消息</h2>
-                <p>
-                  {isRealThread
-                    ? '在下方输入框发送第一条消息，它会真实进入主管图。'
-                    : '在下方输入框发送第一条消息（Demo 模式，不会调用后端）。'}
-                </p>
+                <p>在下方输入框发送第一条消息，它会真实进入主管图。</p>
               </div>
             )
           ) : (
@@ -322,26 +308,10 @@ export function ChatPage({ threadId }: ChatPageProps) {
               </div>
               <h2>今天想做什么？</h2>
               <p>
-                从左侧选择一个会话继续，或点「新建会话」开始一段真实对话。
+                {online
+                  ? '直接输入即可：发送时会自动创建会话并写入后端。'
+                  : '未连接本地服务，暂时无法创建会话。'}
               </p>
-              {/* ← AI 改动（A）：演示会话建议只在未连接时出现。
-                  在线还展示 demo 会话，等于把不存在的数据摆到用户面前。 */}
-              {backend.status === 'online' ? null : (
-                <div className="chat-welcome__suggestions">
-                  {demoThreads.slice(0, 3).map((item) => (
-                    <Link
-                      key={item.id}
-                      className="suggestion-chip"
-                      to={`/chat/${item.id}`}
-                    >
-                      <span>{item.title}</span>
-                      <span className="suggestion-chip__meta">
-                        {item.updatedAt}
-                      </span>
-                    </Link>
-                  ))}
-                </div>
-              )}
             </div>
           )}
 
@@ -358,13 +328,7 @@ export function ChatPage({ threadId }: ChatPageProps) {
 
           {streamError ? (
             <div className="demo-note" role="alert">
-              ⚠ 发送失败：{streamError}
-            </div>
-          ) : null}
-
-          {hasConversation && !isRealThread ? (
-            <div className="demo-note">
-              ⓘ Demo 模式：审批操作仅改变本地演示状态，不会调用后端，也不会真正执行工具。
+              ⚠ {streamError}
             </div>
           ) : null}
         </div>

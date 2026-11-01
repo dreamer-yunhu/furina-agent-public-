@@ -54,10 +54,65 @@ export interface ApiPendingResponse {
   } | null
 }
 
+/** 执行（后端 AgentExecution 的投影） */
+export interface ApiExecutionItem {
+  id: string
+  task_id: string
+  status: string
+  graph_thread_id: string
+  validation_failure_reason: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+/** GET /agent/tasks/{id} */
+export interface ApiTaskDetail extends ApiTaskItem {
+  failure_reason: string | null
+  executions: ApiExecutionItem[]
+  approvals: ApiApprovalItem[]
+}
+
+/** GET /agent/executions/{id} */
+export interface ApiExecutionDetail extends ApiExecutionItem {
+  thread_id: string
+  thread_title: string
+  task: ApiTaskItem
+  approvals: ApiApprovalItem[]
+}
+
+/** GET /agent/approvals/{id} */
+export interface ApiApprovalDetail extends ApiApprovalItem {
+  task: ApiTaskItem
+}
+
 /** GET /agent/tasks */
-export function listTasks(page = 1, size = 20): Promise<ApiTaskList> {
+export function listTasks(
+  page = 1,
+  size = 20,
+  threadId?: string,
+): Promise<ApiTaskList> {
   const query = new URLSearchParams({ page: String(page), size: String(size) })
+  if (threadId) query.set('thread_id', threadId)
   return apiFetch<ApiTaskList>(`/agent/tasks?${query.toString()}`)
+}
+
+/** GET /agent/tasks/{id} —— 详情比列表多 executions / approvals / 完整 instruction */
+export function getTask(taskId: string): Promise<ApiTaskDetail> {
+  return apiFetch<ApiTaskDetail>(`/agent/tasks/${encodeURIComponent(taskId)}`)
+}
+
+/** GET /agent/executions/{id} */
+export function getExecution(executionId: string): Promise<ApiExecutionDetail> {
+  return apiFetch<ApiExecutionDetail>(
+    `/agent/executions/${encodeURIComponent(executionId)}`,
+  )
+}
+
+/** GET /agent/approvals/{id} */
+export function getApproval(approvalId: string): Promise<ApiApprovalDetail> {
+  return apiFetch<ApiApprovalDetail>(
+    `/agent/approvals/${encodeURIComponent(approvalId)}`,
+  )
 }
 
 /** GET /agent/approvals */

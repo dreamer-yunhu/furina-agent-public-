@@ -40,8 +40,8 @@ export function Composer({ onSend, disabled = false }: ComposerProps) {
         <button
           type="button"
           className="pill-btn"
-          title="附件（Demo 未实现）"
-          aria-label="附件（Demo 未实现）"
+          title="附件（暂未实现）"
+          aria-label="附件（暂未实现）"
           disabled
         >
           <Icon name="plus" size={13} />

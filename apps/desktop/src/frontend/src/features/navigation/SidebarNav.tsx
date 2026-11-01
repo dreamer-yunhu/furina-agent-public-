@@ -2,7 +2,7 @@
 // 复核重点：
 //   1. 结构对齐 Codex 原型：品牌 → 新建会话 → 工作区导航 → 最近会话 → 底部用户。
 //   2. 折叠态由 CSS 的 data-sidebar 控制；这里只提供 title 与导航语义。
-//   3. 所有线程/计数来自 demo/data.ts，不代表真实后端。
+//   3. ★ 删掉 demo 依赖：线程、计数一律来自后端；未连接时显示空状态而不是示例数据。
 
 import { useState } from 'react'
 
@@ -11,7 +11,6 @@ import { useBackend } from '../../app/providers/backendContext'
 import { navigate, type RouteName } from '../../app/router'
 import { artwork } from '../../assets/app/artwork'
 import { Icon } from '../../components/ui/Icon'
-import { demoApprovals, demoTasks, demoThreads } from '../../demo/data'
 import {
   createThread,
   deleteThread,
@@ -19,21 +18,11 @@ import {
 } from '../../services/api/threads'
 import type { ApiThreadSummary } from '../../services/api/types'
 
-const DOT_CLASS: Record<string, string> = {
-  waiting_approval: '',
-  completed: 'green',
-  failed: 'red',
-  idle: 'gray',
-}
-
-/** 最近会话的展示模型：Demo 与真实数据在这里归一，渲染层只认这些字段。 */
+/** 最近会话的展示模型：渲染层只认这些字段。 */
 interface RecentThreadItem {
   id: string
   title: string
   meta: string
-  /** 真实列表接口不返回运行状态，所以允许缺失 —— 缺失时不要画状态点 */
-  status?: string
-  pendingApprovals?: number
 }
 
 /**
@@ -61,7 +50,7 @@ interface SidebarNavProps {
   active: RouteName
   collapsed: boolean
   activeThreadId?: string
-  /** 后端是否已连上；未连上时回落到 Demo 数据 */
+  /** 后端是否已连上；未连上时列表为空并给出提示 */
   backendOnline?: boolean
   backendThreads?: ApiThreadSummary[]
 }
@@ -78,13 +67,10 @@ export function SidebarNav({
   const [draftTitle, setDraftTitle] = useState('')
   const [actionError, setActionError] = useState<string | undefined>(undefined)
 
-  const pendingAudit = demoApprovals.filter(
-    (approval) => approval.status === 'pending',
-  ).length
   const isChat = active === 'chat'
   const newChatActive = isChat && !activeThreadId
 
-  /** 在线时真建线程；离线时退回 Demo 的空会话页 */
+  /** 在线时真建线程；离线时只跳转到空会话页 */
   const handleNewChat = async () => {
     if (!backendOnline) {
       navigate('/chat')
@@ -139,24 +125,12 @@ export function SidebarNav({
     }
   }
 
-  // ← AI 改动（A）：判据只看"是否在线"。
-  // 原来的 `&& backendThreads.length > 0` 把"在线但还没有会话"误判成"离线"，
-  // 于是空列表被 4 条演示会话填满 —— 用户看到已连接却显示假数据。
-  // 复核重点：在线时的空列表必须显示空状态，不能回落 demo。
-  const useRealThreads = backendOnline
-  const recentThreads: RecentThreadItem[] = useRealThreads
-    ? backendThreads.map((thread) => ({
-        id: thread.id,
-        title: thread.title,
-        meta: formatThreadTime(thread.updated_at),
-      }))
-    : demoThreads.map((thread) => ({
-        id: thread.id,
-        title: thread.title,
-        meta: thread.updatedAt,
-        status: thread.status,
-        pendingApprovals: thread.pendingApprovals,
-      }))
+  // ← AI 改动：只渲染真实线程，不再有 demo 回落。
+  const recentThreads: RecentThreadItem[] = backendThreads.map((thread) => ({
+    id: thread.id,
+    title: thread.title,
+    meta: formatThreadTime(thread.updated_at),
+  }))
 
   return (
     <div className="sidebar">
@@ -216,10 +190,7 @@ export function SidebarNav({
             <Icon name="list" size={15} />
           </span>
           <span>任务</span>
-          {/* ← AI 改动（A）：在线时侧栏没有真实任务数可显示，不能拿演示数量充数 */}
-          {backendOnline ? null : (
-            <span className="count">{demoTasks.length}</span>
-          )}
+
         </Link>
         <Link
           to="/audit"
@@ -239,10 +210,7 @@ export function SidebarNav({
             <Icon name="shield" size={15} />
           </span>
           <span>审计</span>
-          {/* ← AI 改动（A）：pendingAudit 来自 demoApprovals，在线时不能显示 */}
-          {backendOnline ? null : (
-            <span className="count">{pendingAudit}</span>
-          )}
+
         </Link>
         <Link
           to="/settings"
@@ -259,9 +227,10 @@ export function SidebarNav({
 
       <div className="side-section">
         <div className="nav-label">最近会话</div>
-        {/* ← AI 新增（A）：在线但没有会话时显示空状态，而不是演示数据 */}
-        {useRealThreads && recentThreads.length === 0 ? (
-          <div className="nav-empty muted">还没有会话</div>
+        {recentThreads.length === 0 ? (
+          <div className="nav-empty muted">
+            {backendOnline ? '还没有会话' : '未连接本地服务'}
+          </div>
         ) : null}
         {recentThreads.map((thread) =>
           editingId === thread.id ? (
@@ -291,21 +260,10 @@ export function SidebarNav({
                 title={collapsed ? thread.title : undefined}
               >
                 <div className="thread-title">{thread.title}</div>
-                <div className="thread-meta">
-                  {thread.status ? (
-                    <span
-                      className={`dot ${DOT_CLASS[thread.status] ?? ''}`}
-                      aria-hidden="true"
-                    />
-                  ) : null}
-                  {thread.meta}
-                  {thread.pendingApprovals
-                    ? ` · ${thread.pendingApprovals} 待审批`
-                    : ''}
-                </div>
+                <div className="thread-meta">{thread.meta}</div>
               </Link>
 
-              {useRealThreads ? (
+              {backendOnline ? (
                 <div className="thread-actions">
                   <button
                     type="button"
@@ -354,7 +312,7 @@ export function SidebarNav({
           <div>
             芙芙 Agent
             <small>
-              {backendOnline ? '本地工作空间 · 已连接' : '本地工作空间 · Demo'}
+              {backendOnline ? '本地工作空间 · 已连接' : '本地工作空间 · 未连接'}
             </small>
           </div>
         </div>

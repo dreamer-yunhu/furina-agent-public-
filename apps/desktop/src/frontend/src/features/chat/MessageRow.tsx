@@ -1,36 +1,16 @@
-// ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：消息结构对齐 Codex 原型（user-row / msg / tool-row），
-// 工具调用状态与审批状态分开显示。
+// ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
+// 复核重点：
+//   1. ★ 删掉了工具调用行的渲染与 `getDemoApproval` 依赖。
+//      原因：后端 `GET /threads/{id}/messages` 目前**不返回**每条消息的
+//      工具调用与审批引用，前端拿不到这些数据。留着渲染分支只会产生
+//      "永远不显示"的死代码，误导后来者以为已经接上了。
+//      真正要做，得先在后端补 field —— 见 docs/PROGRESS.md 待办。
+//   2. role === 'system' 用中性提示样式，不当成对话气泡。
 
 import { artwork } from '../../assets/app/artwork'
-import { Icon } from '../../components/ui/Icon'
-import type { DemoMessage, DemoToolCall } from '../../demo/types'
-import { TOOL_STATUS_META } from '../shared/statusMeta'
+import type { ViewMessage } from '../../types/view'
 
-function ToolCallRow({ call }: { call: DemoToolCall }) {
-  const meta = TOOL_STATUS_META[call.status]
-  const statusClass =
-    call.status === 'pending'
-      ? 'tool-status pending'
-      : call.status === 'failed'
-        ? 'tool-status failed'
-        : 'tool-status'
-
-  return (
-    <div className="tool-row">
-      <div className="tool-icon">
-        <Icon name="terminal" size={13} />
-      </div>
-      <span className="mono">{call.name}</span>
-      <span>{call.target}</span>
-      <span className={statusClass}>
-        {call.status === 'pending' ? '等待审批' : meta.label}
-      </span>
-    </div>
-  )
-}
-
-export function MessageRow({ message }: { message: DemoMessage }) {
+export function MessageRow({ message }: { message: ViewMessage }) {
   if (message.role === 'system') {
     return <div className="demo-note">ⓘ {message.content}</div>
   }
@@ -57,13 +37,6 @@ export function MessageRow({ message }: { message: DemoMessage }) {
           芙芙 Agent <span>{message.at}</span>
         </div>
         <div className="msg-text">{message.content}</div>
-        {message.toolCalls?.length ? (
-          <div>
-            {message.toolCalls.map((call) => (
-              <ToolCallRow key={call.id} call={call} />
-            ))}
-          </div>
-        ) : null}
       </div>
     </div>
   )

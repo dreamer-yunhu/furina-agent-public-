@@ -1,41 +1,27 @@
-// ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：对齐 Codex 原型的 chat-head：标题 + 标签行 + 审计入口。
+// ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
+// 复核重点：
+//   1. ★ 去掉了「Demo 数据 / 真实数据」标签和"无待审批"推断。
+//      原因：删掉 demo 后只剩真实数据，标签没有意义；而"待审批"这个信息
+//      后端列表接口并不返回，前端自己推不出来 —— 编一个就是假信息。
+//   2. 只保留标题、线程 id 与审计入口。
 
 import { Link } from '../../app/Link'
-import type { DemoThread } from '../../demo/types'
 
 interface ConversationHeaderProps {
-  thread?: DemoThread
+  title?: string
   threadId?: string
-  /** true 时说明数据来自本地后端，不能再挂「Demo 数据」标签 */
-  backendMode?: boolean
 }
 
 export function ConversationHeader({
-  thread,
+  title,
   threadId,
-  backendMode = false,
 }: ConversationHeaderProps) {
-  const pending = thread?.pendingApprovals ?? 0
-  const id = thread?.id ?? threadId
-
   return (
     <header className="chat-head">
       <div>
-        <h1>{thread?.title ?? '新建会话'}</h1>
+        <h1>{title ?? '新建会话'}</h1>
         <div className="subline">
-          <span className="tag">
-            线程 · {id ?? 'new-chat'}
-          </span>
-          {backendMode ? null : pending ? (
-            <span className="tag amber">● {pending} 项待审批</span>
-          ) : (
-            <span className="tag green">✓ 无待审批</span>
-          )}
-          <span className="tag">{backendMode ? '真实数据' : 'Demo 数据'}</span>
-          {backendMode ? null : (
-            <span>最近活动 {thread?.updatedAt ?? '刚刚'}</span>
-          )}
+          <span className="tag">线程 · {threadId ?? 'new-chat'}</span>
         </div>
       </div>
       <Link className="pill-btn" to="/audit">

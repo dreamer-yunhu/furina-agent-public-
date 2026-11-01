@@ -1,5 +1,12 @@
-// ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：一个 Task 可以有多个 Execution；历史列表不覆盖旧记录。
+// ── AI-ASSISTED ── 本文件由 AI 生成/改写，待人工复核 ──
+// 复核重点：
+//   1. ★ 整页从「查 demo 表」改成「调 GET /agent/tasks/{id}」。
+//      demo 版查不到就显示"Demo 数据中没有这个任务"，真实任务永远进不去。
+//   2. 三种非正常态必须分开显示：加载中 / 请求失败（含后端未连接）/ 404。
+//      混成一个"任务不存在"会让人误以为数据丢了。
+//   3. 一个 Task 可以有多次 Execution，**全部列出**，历史不覆盖。
+
+import { useEffect, useState } from 'react'
 
 import { Link } from '../app/Link'
 import { ContentSection } from '../components/ui/ContentSection'
@@ -8,31 +15,78 @@ import { KeyValueList } from '../components/ui/KeyValueList'
 import { PageHeader } from '../components/ui/PageHeader'
 import { StatusPill } from '../components/ui/StatusPill'
 import {
-  getDemoApproval,
-  getDemoTask,
-  getDemoThread,
-} from '../demo/data'
-import type { DemoApproval } from '../demo/types'
-import {
   APPROVAL_STATUS_META,
-  RUN_STATUS_META,
+  EXECUTION_STATUS_META,
+  TASK_STATUS_META,
+  TOOL_EXECUTION_META,
+  statusMeta,
 } from '../features/shared/statusMeta'
+import { ApiError } from '../services/api/client'
+import { getTask, type ApiTaskDetail } from '../services/api/activity'
 
-interface TaskDetailPageProps {
-  taskId: string
+type LoadState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string; status?: number }
+  | { kind: 'ready'; task: ApiTaskDetail }
+
+function formatTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
-export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
-  const task = getDemoTask(taskId)
+export function TaskDetailPage({ taskId }: { taskId: string }) {
+  const [state, setState] = useState<LoadState>({ kind: 'loading' })
 
-  if (!task) {
+  useEffect(() => {
+    let cancelled = false
+    setState({ kind: 'loading' })
+    getTask(taskId)
+      .then((task) => {
+        if (!cancelled) setState({ kind: 'ready', task })
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        setState({
+          kind: 'error',
+          message: error instanceof Error ? error.message : String(error),
+          status: error instanceof ApiError ? error.status : undefined,
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [taskId])
+
+  if (state.kind === 'loading') {
     return (
       <div className="page">
-        <PageHeader title="任务不存在" description="Demo 数据中没有这个任务。" />
+        <PageHeader title="任务详情" description="正在从本地服务读取…" />
+        <div className="page-content">
+          <EmptyState title="加载中" description={`task_id = ${taskId}`} />
+        </div>
+      </div>
+    )
+  }
+
+  if (state.kind === 'error') {
+    const notFound = state.status === 404
+    return (
+      <div className="page">
+        <PageHeader
+          title={notFound ? '任务不存在' : '读取任务失败'}
+          description={notFound ? '后端没有这条记录。' : '本地服务没有返回可用数据。'}
+        />
         <div className="page-content">
           <EmptyState
-            title="找不到任务"
-            description={`Demo 数据未包含 task_id = ${taskId}`}
+            title={notFound ? '404' : '请求失败'}
+            description={state.message}
           />
           <div className="page__actions">
             <Link className="pill-btn" to="/tasks">
@@ -44,22 +98,18 @@ export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
     )
   }
 
-  const thread = getDemoThread(task.threadId)
-  const statusMeta = RUN_STATUS_META[task.status]
-  const approvals = task.approvalIds
-    .map((id) => getDemoApproval(id))
-    .filter((item): item is DemoApproval => Boolean(item))
+  const task = state.task
+  const status = statusMeta(TASK_STATUS_META, task.status)
 
   return (
     <div className="page">
       <PageHeader
-        title={task.title}
+        title={task.instruction || '(无指令)'}
         description="任务概览、Execution 历史与关联审批。"
         meta={
           <>
-            <StatusPill tone={statusMeta.tone}>{statusMeta.label}</StatusPill>
-            <span className="tag">Demo 数据</span>
-            <span className="muted">更新于 {task.updatedAt}</span>
+            <StatusPill tone={status.tone}>{status.label}</StatusPill>
+            <span className="muted">更新于 {formatTime(task.updated_at)}</span>
           </>
         }
       />
@@ -71,26 +121,20 @@ export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
               { label: 'Task ID', value: <code>{task.id}</code> },
               {
                 label: '所属会话',
-                value: thread ? (
-                  <Link className="text-link" to={`/chat/${thread.id}`}>
-                    {thread.title}
-                  </Link>
-                ) : (
-                  <span className="muted">{task.threadId}</span>
-                ),
-              },
-              {
-                label: '任务状态',
                 value: (
-                  <StatusPill tone={statusMeta.tone}>
-                    {statusMeta.label}
-                  </StatusPill>
+                  <Link className="text-link" to={`/chat/${task.thread_id}`}>
+                    {task.thread_title}
+                  </Link>
                 ),
               },
+              { label: '任务状态', value: <StatusPill tone={status.tone}>{status.label}</StatusPill> },
               {
                 label: 'Execution 数量',
                 value: String(task.executions.length),
               },
+              ...(task.failure_reason
+                ? [{ label: '失败原因', value: task.failure_reason }]
+                : []),
             ]}
           />
         </ContentSection>
@@ -101,7 +145,7 @@ export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
         >
           {task.executions.length ? (
             task.executions.map((execution) => {
-              const meta = RUN_STATUS_META[execution.status]
+              const meta = statusMeta(EXECUTION_STATUS_META, execution.status)
               return (
                 <Link
                   key={execution.id}
@@ -111,11 +155,13 @@ export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
                   <div>
                     <b className="mono">{execution.id}</b>
                     <small>
-                      {execution.startedAt}
-                      {execution.finishedAt
-                        ? ` → ${execution.finishedAt}`
-                        : ' → 进行中'}{' '}
-                      · {execution.summary}
+                      {formatTime(execution.created_at)}
+                      {execution.finished_at
+                        ? ` → ${formatTime(execution.finished_at)}`
+                        : ' → 进行中'}
+                      {execution.validation_failure_reason
+                        ? ` · ${execution.validation_failure_reason}`
+                        : ''}
                     </small>
                   </div>
                   <div className="right">
@@ -133,25 +179,35 @@ export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
         </ContentSection>
 
         <ContentSection title="关联审批">
-          {approvals.length ? (
-            approvals.map((approval) => {
-              const meta = APPROVAL_STATUS_META[approval.status]
+          {task.approvals.length ? (
+            task.approvals.map((approval) => {
+              const approvalMeta = statusMeta(
+                APPROVAL_STATUS_META,
+                approval.approval_status,
+              )
+              const toolMeta = statusMeta(
+                TOOL_EXECUTION_META,
+                approval.tool_execution_status,
+              )
               return (
                 <Link
                   key={approval.id}
                   className="record"
-                  to={`/audit/${approval.threadId}/${approval.id}`}
+                  to={`/audit/${approval.thread_id}/${approval.id}`}
                 >
                   <div>
                     <b>
-                      {approval.toolName} · {approval.target}
+                      {approval.tool_name} ·{' '}
+                      {approval.target_path ?? '(无目标路径)'}
                     </b>
                     <small>
-                      {approval.requestedAt} · {approval.summary}
+                      {formatTime(approval.created_at)} · 工具执行：{toolMeta.label}
                     </small>
                   </div>
                   <div className="right">
-                    <StatusPill tone={meta.tone}>{meta.label}</StatusPill>
+                    <StatusPill tone={approvalMeta.tone}>
+                      {approvalMeta.label}
+                    </StatusPill>
                   </div>
                 </Link>
               )
@@ -163,10 +219,6 @@ export function TaskDetailPage({ taskId }: TaskDetailPageProps) {
             />
           )}
         </ContentSection>
-
-        <p className="demo-note">
-          Demo 数据：任务与 Execution 均为本地演示；「已完成」不代表所有工具都成功。
-        </p>
       </div>
     </div>
   )

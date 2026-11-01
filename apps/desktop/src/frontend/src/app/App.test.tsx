@@ -1,10 +1,42 @@
 // ── AI-ASSISTED ── 本文件由 AI 生成，待人工复核 ──
-// 复核重点：只测前端路由、布局与 Demo 交互，不启动后端、不 mock 业务数据。
+// 复核重点：
+//   1. ★ 删掉 demo 后，详情页会真的发请求。测试里**必须 mock 接口层**，
+//      否则用例结果取决于本机有没有起后端（上一版靠"jsdom 无 fetch"侥幸通过）。
+//   2. 只测路由与布局；不测后端行为（那是 pytest 的事）。
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
+
+// ── 接口层替身 ───────────────────────────────────────────────────────────
+// 返回固定数据，让页面能进入 ready 态；断言只针对渲染结果。
+vi.mock('../services/api/activity', () => ({
+  listTasks: vi.fn(async () => ({ items: [], total: 0, page: 1, size: 20 })),
+  listApprovals: vi.fn(async () => ({ items: [], total: 0, page: 1, size: 50 })),
+  getPending: vi.fn(async () => ({ pending: null })),
+  getTask: vi.fn(async (taskId: string) => ({
+    id: taskId,
+    thread_id: 'thread-lab-summary',
+    thread_title: '测试会话',
+    instruction: '整理实验结果并生成摘要',
+    status: 'COMPLETED',
+    failure_reason: null,
+    created_at: '2026-10-30T10:00:00',
+    updated_at: '2026-10-30T10:05:00',
+    executions: [],
+    approvals: [],
+  })),
+  getExecution: vi.fn(),
+  getApproval: vi.fn(),
+}))
+
+vi.mock('../services/api/threads', () => ({
+  listThreads: vi.fn(async () => ({ items: [], total: 0, page: 1, size: 100 })),
+  createThread: vi.fn(),
+  renameThread: vi.fn(),
+  deleteThread: vi.fn(),
+}))
 
 function setHash(hash: string) {
   window.history.replaceState(null, '', hash)
@@ -53,12 +85,12 @@ describe('App navigation', () => {
     expect(window.location.hash).toBe('#/audit')
   })
 
-  it('renders task detail from a demo route param', () => {
+  it('renders task detail from the route param (mocked API)', async () => {
     setHash('#/tasks/task-lab-summary')
     render(<App />)
 
     expect(
-      screen.getByRole('heading', {
+      await screen.findByRole('heading', {
         level: 1,
         name: '整理实验结果并生成摘要',
       }),
@@ -99,14 +131,15 @@ describe('App navigation', () => {
     ).toBeInTheDocument()
   })
 
-  it('opens the inspector on a conversation', () => {
+  it('opens the inspector on a conversation', async () => {
     setHash('#/chat/thread-lab-summary')
     render(<App />)
 
     fireEvent.click(screen.getByRole('button', { name: '详情面板' }))
 
-    expect(screen.getByText('当前任务详情')).toBeInTheDocument()
-    expect(screen.getByText('最近工具调用')).toBeInTheDocument()
+    // 详情面板现在读真实接口（已 mock），断言它渲染出统计字段
+    expect(await screen.findByText('任务数')).toBeInTheDocument()
+    expect(screen.getByText('审批数')).toBeInTheDocument()
   })
 
   it('switches theme from settings and updates the document root', () => {

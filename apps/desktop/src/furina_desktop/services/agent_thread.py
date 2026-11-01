@@ -280,6 +280,7 @@ async def list_user_tasks(
         session: AsyncSession,
         *,
         user_id: uuid.UUID,
+        thread_id: uuid.UUID | None = None,
         page: int = 1,
         size: int = 20,
 ) -> tuple[list[tuple[object, str]], int]:
@@ -289,6 +290,8 @@ async def list_user_tasks(
         .join(AgentThreadID, AgentTask.thread_id == AgentThreadID.id)
         .where(AgentThreadID.user_id == user_id)
     )
+    if thread_id is not None:
+        base = base.where(AgentTask.thread_id == thread_id)
     total = int(await session.scalar(select(func.count()).select_from(base.subquery())) or 0)
     rows = (
         await session.execute(
@@ -329,3 +332,120 @@ async def list_user_approvals(
         )
     ).all()
     return [(row[0], row[1], row[2]) for row in rows], total
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 详情查询（← 前端去 demo 后新增）
+# ══════════════════════════════════════════════════════════════════════
+# 复核重点：
+#   1. 三个 get_* 都**必须走归属校验**（join agentthreadid 并比对 user_id），
+#      否则知道 UUID 就能读到别人的任务/审批。查不到一律 404，不区分
+#      "不存在" 与 "不属于你"。
+#   2. 这些函数返回的是 ORM 对象，字段裁剪在 api 层做 —— 与列表接口一致。
+
+async def _owned_task_row(
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        task_id: uuid.UUID,
+) -> tuple[AgentTask, str]:
+    row = (
+        await session.execute(
+            select(AgentTask, AgentThreadID.title)
+            .join(AgentThreadID, AgentTask.thread_id == AgentThreadID.id)
+            .where(AgentTask.id == task_id, AgentThreadID.user_id == user_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    return row[0], row[1]
+
+
+async def get_user_task(
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        task_id: uuid.UUID,
+) -> tuple[AgentTask, str]:
+    """返回 (任务, 会话标题)；不属于当前用户 → 404。"""
+    return await _owned_task_row(session, user_id=user_id, task_id=task_id)
+
+
+async def list_task_executions(
+        session: AsyncSession,
+        *,
+        task_id: uuid.UUID,
+) -> list[AgentExecution]:
+    """该任务的全部执行，按创建时间正序（历史不覆盖旧记录）。"""
+    stmt = (
+        select(AgentExecution)
+        .where(AgentExecution.task_id == task_id)
+        .order_by(AgentExecution.created_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def list_task_approvals(
+        session: AsyncSession,
+        *,
+        task_id: uuid.UUID,
+) -> list[ApprovalRequest]:
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.task_id == task_id)
+        .order_by(ApprovalRequest.created_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def list_execution_approvals(
+        session: AsyncSession,
+        *,
+        execution_id: uuid.UUID,
+) -> list[ApprovalRequest]:
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.execution_id == execution_id)
+        .order_by(ApprovalRequest.created_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_user_execution(
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        execution_id: uuid.UUID,
+) -> tuple[AgentExecution, AgentTask, str]:
+    """返回 (执行, 所属任务, 会话标题)；不属于当前用户 → 404。"""
+    row = (
+        await session.execute(
+            select(AgentExecution, AgentTask, AgentThreadID.title)
+            .join(AgentTask, AgentExecution.task_id == AgentTask.id)
+            .join(AgentThreadID, AgentTask.thread_id == AgentThreadID.id)
+            .where(AgentExecution.id == execution_id, AgentThreadID.user_id == user_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="执行不存在")
+    return row[0], row[1], row[2]
+
+
+async def get_user_approval(
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        approval_id: uuid.UUID,
+) -> tuple[ApprovalRequest, AgentTask, str]:
+    """返回 (审批, 所属任务, 会话标题)；不属于当前用户 → 404。"""
+    row = (
+        await session.execute(
+            select(ApprovalRequest, AgentTask, AgentThreadID.title)
+            .join(AgentTask, ApprovalRequest.task_id == AgentTask.id)
+            .join(AgentThreadID, AgentTask.thread_id == AgentThreadID.id)
+            .where(ApprovalRequest.id == approval_id, AgentThreadID.user_id == user_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="审批记录不存在")
+    return row[0], row[1], row[2]

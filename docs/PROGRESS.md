@@ -279,6 +279,30 @@ cd C:\furina-agent
 > 原 `AI-CHANGES.md` 的职责并入本节；完整历史见 git。
 > 新增改动请追加到本表，并写明**复核重点**。
 
+### 2026-11-01 · 删除前端 demo 数据，前后端全链路接通
+
+> 用户要求：**"我要的是一个允许出 bug 的 app，不是一个 demo"**。
+> 本刀把前端残留的演示数据全部删除，并补齐后端缺失的详情接口。
+
+| 文件 | 改动 | 复核重点 |
+|---|---|---|
+| `src/demo/{data,types}.ts`、`components/ui/DemoBadge.tsx`、`features/chat/ApprovalCard.tsx` | **删除** | ApprovalCard 依赖 demo 的 approvalId，真实接口不返回该字段，保留只会是死代码 |
+| `furina_desktop/services/agent_thread.py` | 新增 `get_user_task` / `get_user_execution` / `get_user_approval` / `list_task_executions` / `list_task_approvals` / `list_execution_approvals`；`list_user_tasks` 支持 `thread_id` 过滤 | 三个 `get_*` **必须** join `agentthreadid` 校验归属，否则知道 UUID 就能读到别人的数据；查不到一律 404 |
+| `furina_desktop/api/agent.py` | 新增 `GET /agent/tasks/{id}`、`/executions/{id}`、`/approvals/{id}`；`/tasks` 增加 `thread_id` 查询参数 | 详情返回**完整** instruction（列表才截断 200 字）；executions 按创建时间正序 |
+| `apps/desktop/tests/test_detail_api.py` | **新建**：5 个契约用例 | 钉死字段集与 404 语义；字段改名必须同步改这里 |
+| `src/types/view.ts` | **新建**：视图层类型（取代 `demo/types.ts`） | 视图类型 ≠ 后端 DTO，映射只在一处做 |
+| `src/features/shared/statusMeta.ts` | 映射键从 demo 小写状态改为**后端大写枚举** | 键必须与 `furina_core.task.enums` 逐字一致，否则界面显示原始英文 |
+| `src/pages/{TaskDetail,ExecutionDetail,AuditThread,AuditApprovalDetail}Page.tsx` | 全部改为真实接口，含 loading / 请求失败 / 404 三态 | 三态必须分开显示，混成"任务不存在"会误导 |
+| `src/pages/TasksPage.tsx` | 删除离线 demo 分支；卡片改链任务详情 | — |
+| `src/pages/ChatPage.tsx` | 删除 demo 会话分支；`/chat` 首条消息**自动建线程**再发送 | 建线程后靠模块级 `pendingFirstMessage` 交给重挂载的页面发送，否则流式内容会随旧实例卸载丢失 |
+| `src/features/inspector/RouteInspector.tsx` | 按路由调真实接口 | 面板数据独立请求，单接口失败只影响面板 |
+| `src/features/navigation/SidebarNav.tsx` | 删除 demo 线程/计数回落 | — |
+| `src-tauri/src/backend.rs` | 子进程加 `CREATE_NO_WINDOW` | **实测 bug**：无控制台启动时会分配新控制台，其关闭事件让后端以 `0xC000013A` 退出（READY 后几秒消失，终端启动复现不了） |
+
+**已验证**：后端 pytest **46 passed**（含 5 个新用例）；前端 tsc/vite 构建通过、vitest **22 passed**；安装版连续启动 3 次后端均存活且 `/healthz` 200，异常退出记录 **0**；三个详情接口实测返回真实数据（任务 COMPLETED / 执行 1 条 / 审批 APPROVED+SUCCEEDED）。
+
+**未验证**：前端页面未做逐屏点击验收（只验证了接口与构建）；审批卡片在详情页的 diff 预览仍无（接口不返回 `args_json`）。
+
 ### 2026-10-30 · D1.1 Release 启动可观测性补全
 
 > 前置：`docs/audit/2026-10-30-D1-后端托管-审计报告.md`（只读审计，结论是"托管已实现，缺的是可观测性"）。
