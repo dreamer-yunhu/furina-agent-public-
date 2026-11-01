@@ -324,20 +324,24 @@ export function ChatPage({ threadId }: ChatPageProps) {
               <p>
                 从左侧选择一个会话继续，或点「新建会话」开始一段真实对话。
               </p>
-              <div className="chat-welcome__suggestions">
-                {demoThreads.slice(0, 3).map((item) => (
-                  <Link
-                    key={item.id}
-                    className="suggestion-chip"
-                    to={`/chat/${item.id}`}
-                  >
-                    <span>{item.title}</span>
-                    <span className="suggestion-chip__meta">
-                      {item.updatedAt}
-                    </span>
-                  </Link>
-                ))}
-              </div>
+              {/* ← AI 改动（A）：演示会话建议只在未连接时出现。
+                  在线还展示 demo 会话，等于把不存在的数据摆到用户面前。 */}
+              {backend.status === 'online' ? null : (
+                <div className="chat-welcome__suggestions">
+                  {demoThreads.slice(0, 3).map((item) => (
+                    <Link
+                      key={item.id}
+                      className="suggestion-chip"
+                      to={`/chat/${item.id}`}
+                    >
+                      <span>{item.title}</span>
+                      <span className="suggestion-chip__meta">
+                        {item.updatedAt}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

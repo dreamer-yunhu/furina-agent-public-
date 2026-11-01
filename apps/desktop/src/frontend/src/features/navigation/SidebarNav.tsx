@@ -139,7 +139,11 @@ export function SidebarNav({
     }
   }
 
-  const useRealThreads = backendOnline && backendThreads.length > 0
+  // ← AI 改动（A）：判据只看"是否在线"。
+  // 原来的 `&& backendThreads.length > 0` 把"在线但还没有会话"误判成"离线"，
+  // 于是空列表被 4 条演示会话填满 —— 用户看到已连接却显示假数据。
+  // 复核重点：在线时的空列表必须显示空状态，不能回落 demo。
+  const useRealThreads = backendOnline
   const recentThreads: RecentThreadItem[] = useRealThreads
     ? backendThreads.map((thread) => ({
         id: thread.id,
@@ -212,7 +216,10 @@ export function SidebarNav({
             <Icon name="list" size={15} />
           </span>
           <span>任务</span>
-          <span className="count">{demoTasks.length}</span>
+          {/* ← AI 改动（A）：在线时侧栏没有真实任务数可显示，不能拿演示数量充数 */}
+          {backendOnline ? null : (
+            <span className="count">{demoTasks.length}</span>
+          )}
         </Link>
         <Link
           to="/audit"
@@ -232,7 +239,10 @@ export function SidebarNav({
             <Icon name="shield" size={15} />
           </span>
           <span>审计</span>
-          <span className="count">{pendingAudit}</span>
+          {/* ← AI 改动（A）：pendingAudit 来自 demoApprovals，在线时不能显示 */}
+          {backendOnline ? null : (
+            <span className="count">{pendingAudit}</span>
+          )}
         </Link>
         <Link
           to="/settings"
@@ -249,6 +259,10 @@ export function SidebarNav({
 
       <div className="side-section">
         <div className="nav-label">最近会话</div>
+        {/* ← AI 新增（A）：在线但没有会话时显示空状态，而不是演示数据 */}
+        {useRealThreads && recentThreads.length === 0 ? (
+          <div className="nav-empty muted">还没有会话</div>
+        ) : null}
         {recentThreads.map((thread) =>
           editingId === thread.id ? (
             <div className="thread thread--editing" key={thread.id}>

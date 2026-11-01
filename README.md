@@ -2,6 +2,30 @@
 
 桌面优先的 AI 助手：**角色扮演对话 + 代码 Agent（带人工审批）**。
 
+当前版本：**1.1.0**
+
+## 下载安装（Windows）
+
+| | |
+|---|---|
+| 安装包 | [`furina-desktop_1.1.0_x64-setup.exe`](https://github.com/dreamer-yunhu/furina-agent-public-/releases/latest) |
+| 平台 | Windows 10 / 11 x64（WebView2 由安装器内置引导安装） |
+| 大小 | 55.5 MiB |
+| SHA-256 | `d4eed6e1b8625fa1fb000971dccbcffe27327d862d1c4e6238893c61df762e61` |
+
+安装后双击启动即可：应用会自动拉起内置的 Python 后端，无需另外装 Python 或数据库。
+
+**首次使用**：进入「设置」填写大模型密钥（存进 Windows 凭据管理器，不落明文文件），保存后应用会自动重启后端。
+
+**排障位置**（出问题先看这里）：
+
+```
+%LOCALAPPDATA%\com.furina.desktop\logs\furina-desktop.log    # 应用与后端进程管理
+%LOCALAPPDATA%\com.furina.desktop\logs\backend.stdout.log    # 后端 stdout
+%LOCALAPPDATA%\com.furina.desktop\logs\backend.stderr.log    # 后端 stderr / 启动异常
+%LOCALAPPDATA%\com.furina.desktop\backend\logs\desktop.log   # 后端启动阶段日志
+```
+
 ## 仓库结构
 
 ```
@@ -32,7 +56,7 @@ uv run --package furina-desktop python -m furina_desktop
 
 > 需要 `.env` 提供 `base_url` / `api_key`。详见 [docs/WHITEPAPER.md](docs/WHITEPAPER.md) §8。
 
-## 当前状态（2026-10-23）
+## 当前状态（2026-11-01）
 
 | 能力 | 状态 |
 |---|---|
@@ -43,7 +67,10 @@ uv run --package furina-desktop python -m furina_desktop
 | 主管图业务节点（画像/RAG/生成/持久化） | ⚠️ 仍是 `NotImplementedError`（非目标） |
 | HTTP 流式桥（`POST /agent`） | ✅ 已实现（`subgraphs=True`，主管内部 token 不下发） |
 | 审批恢复入口（`/agent/resume`） | ✅ 已实现（T23 链路，404/409 三判据） |
-| 前端 | ❌ 脚手架 |
+| 桌面进程托管 | ✅ Tauri 拉起并回收 Python 后端（Job Object 兜底强杀） |
+| 启动可观测性 | ✅ 应用/子进程/后端三路日志落盘（1.1.0） |
+| 前端会话与列表 | ✅ 会话、任务、审计列表走真实接口；空列表显示空状态 |
+| 前端详情页 | ⚠️ 任务/执行/审计详情仍为演示数据（待接） |
 
 ## 必读文档
 

@@ -338,6 +338,12 @@ code,
   letter-spacing: 0.08em;
 }
 
+/* ← AI 新增（A）：最近会话为空时的占位，避免"没有数据"被演示数据顶替 */
+.nav-empty {
+  padding: 2px 10px 8px;
+  font-size: 12px;
+}
+
 .nav-list {
   display: flex;
   flex-direction: column;
