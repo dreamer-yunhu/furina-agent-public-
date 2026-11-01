@@ -23,6 +23,6 @@
 #   3. `decision_review` / `decision_reviews` 拼写 → 已统一
 #   4. `execute_node` 空函数体 → 已实现并注册（nodes/coder.py）
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 
 __all__ = ["__version__"]

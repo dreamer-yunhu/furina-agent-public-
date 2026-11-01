@@ -1,6 +1,6 @@
 [project]
 name = "furina-desktop"
-version = "0.1.0"
+version = "1.1.0"
 description = "桌面版：agent 引擎（LangGraph 主管图 + coder 子图 + HITL 审批）"
 requires-python = ">=3.12"
 dependencies = [
