@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "furina-desktop",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "identifier": "com.furina.desktop",
   "build": {
     "frontendDist": "../dist",
